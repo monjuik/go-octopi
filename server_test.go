@@ -4,31 +4,60 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
-func TestServerServesIndexWithOctoPi(t *testing.T) {
+func TestServerIndexRendering(t *testing.T) {
 	t.Parallel()
 
 	ts := httptest.NewServer(NewServer())
 	t.Cleanup(ts.Close)
 
-	resp, err := http.Get(ts.URL + "/")
-	if err != nil {
-		t.Fatalf("failed to GET index: %v", err)
+	tests := []struct {
+		name   string
+		assert func(t *testing.T, body string)
+	}{
+		{
+			name: "contains OctoPi",
+			assert: func(t *testing.T, body string) {
+				if !strings.Contains(body, "OctoPi") {
+					t.Fatalf("body missing OctoPi: %q", body)
+				}
+			},
+		},
+		{
+			name: "contains embedded logo",
+			assert: func(t *testing.T, body string) {
+				const prefix = `src="data:image/png;base64,`
+				if !strings.Contains(body, prefix) {
+					t.Fatalf("response missing embedded logo (looking for %q)", prefix)
+				}
+			},
+		},
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("unexpected status: got %d, want %d", resp.StatusCode, http.StatusOK)
-	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("failed to read body: %v", err)
-	}
+			resp, err := http.Get(ts.URL + "/")
+			if err != nil {
+				t.Fatalf("failed to GET index: %v", err)
+			}
+			defer resp.Body.Close()
 
-	if got := string(body); got != "OctoPi" {
-		t.Fatalf("unexpected body: got %q, want %q", got, "OctoPi")
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("unexpected status: got %d, want %d", resp.StatusCode, http.StatusOK)
+			}
+
+			bodyBytes, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("failed to read body: %v", err)
+			}
+
+			tt.assert(t, string(bodyBytes))
+		})
 	}
 }
