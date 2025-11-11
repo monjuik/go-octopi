@@ -30,3 +30,24 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Project binaries
+
+cmd/web/web
+
+# Go build cache (local override used during tests)
+.gocache/
+
+
+# MacOS
+
+.DS_Store
+
+# binary
+
+main
+
+# Test coverage
+
+coverage.html
+coverage.out
