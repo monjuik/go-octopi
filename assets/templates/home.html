@@ -1,58 +1,75 @@
 {{ define "content" }}
-<div class="mb-4">
-    <img src="{{ .LogoDataURI }}" width="128" height="128" alt="OctoPi logo" />
-</div>
-<h1 class="fw-semibold mb-3">OctoPi Portfolio Tracker</h1>
-<p class="text-muted mb-4">
-    Track staking rewards for your Solana and Ethereum wallets
-</p>
+<style>
+  body.home {
+    background: linear-gradient(180deg, #f8fafc 0%, #f1f3f5 100%);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+  }
+  .hero-container {
+    max-width: 700px;
+    text-align: center;
+    padding: 2rem;
+  }
+  .hero-container .form-control,
+  .hero-container .btn-primary {
+    height: 3rem;
+    font-size: 1.1rem;
+  }
+</style>
 
-<form id="walletForm" class="row g-2 justify-content-center">
+<div class="hero-container">
+  <div class="mb-4">
+    <img src="{{ .LogoDataURI }}" width="128" height="128" alt="OctoPi logo">
+  </div>
+  <h1 class="fw-semibold mb-3">OctoPi Portfolio Tracker</h1>
+  <p class="text-muted mb-4">
+    Track staking rewards and on-chain performance across your Solana wallets from a single dashboard.
+  </p>
+
+  <form id="walletForm" class="row g-2 justify-content-center">
     <div class="col-md-8 col-sm-10">
-        <input
-            id="walletInput"
-            type="text"
-            class="form-control"
-            placeholder="Enter your wallet address"
-            required
-        />
+      <input id="walletInput" type="text" class="form-control" placeholder="Enter your wallet address" required>
     </div>
     <div class="col-auto">
-        <button type="submit" class="btn btn-primary">View portfolio</button>
+      <button type="submit" class="btn btn-primary">View portfolio</button>
     </div>
-</form>
+  </form>
 
-<div id="errorMessage" class="text-danger small mt-3" style="display: none">
+  <div id="errorMessage" class="text-danger small mt-3" style="display:none;">
     Invalid address format. Please check and try again.
-</div>
+  </div>
 
-<div class="mt-4">
+  <div class="mt-4">
     <button class="btn btn-outline-secondary btn-sm" id="demoWallet">
-        <i class="bi bi-lightning-charge"></i> Try demo wallet
+      <i class="bi bi-lightning-charge"></i> Try demo wallet
     </button>
+  </div>
 </div>
 
 <script>
-    const form = document.getElementById("walletForm");
-    const input = document.getElementById("walletInput");
-    const errorMsg = document.getElementById("errorMessage");
+  const form = document.getElementById('walletForm');
+  const input = document.getElementById('walletInput');
+  const errorMsg = document.getElementById('errorMessage');
 
-    function isValidSolAddress(address) {
-        return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address);
+  function isValidSolAddress(address) {
+    return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address);
+  }
+
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const addr = input.value.trim();
+    if (isValidSolAddress(addr)) {
+      window.location.href = `/wallet/${addr}`;
+    } else {
+      errorMsg.style.display = 'block';
     }
+  });
 
-    form.addEventListener("submit", (e) => {
-        e.preventDefault();
-        const addr = input.value.trim();
-        if (isValidSolAddress(addr)) {
-            window.location.href = `/wallet/${addr}`;
-        } else {
-            errorMsg.style.display = "block";
-        }
-    });
-
-    document.getElementById("demoWallet").addEventListener("click", () => {
-        window.location.href = "/wallet/demo";
-    });
+  document.getElementById('demoWallet').addEventListener('click', () => {
+    window.location.href = '/wallet/demo';
+  });
 </script>
 {{ end }}

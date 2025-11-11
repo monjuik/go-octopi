@@ -10,45 +10,23 @@
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
 
   <style>
-    body {
-      background: linear-gradient(180deg, #f8fafc 0%, #f1f3f5 100%);
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      flex-direction: column;
-    }
-    .hero-container {
-      max-width: 700px;
-      text-align: center;
-      padding: 2rem;
-    }
-    .form-control {
-      height: 3rem;
-      font-size: 1.1rem;
-    }
-    .btn-primary {
-      height: 3rem;
-      font-size: 1.1rem;
-    }
-    footer {
-      position: absolute;
-      bottom: 1rem;
+    footer.global-footer {
       font-size: 0.875rem;
       color: #6c757d;
+      text-align: center;
+      margin: 2rem 0;
     }
   </style>
 </head>
-<body>
+<body class="{{ .BodyClass }}">
 
-  <div class="hero-container">
-    {{ template "content" . }}
-  </div>
+  {{ template "content" . }}
 
-  <footer>
+  <footer class="global-footer">
     {{ .Footer }}
   </footer>
 
+  <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>

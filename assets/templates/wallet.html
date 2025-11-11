@@ -1,0 +1,196 @@
+{{ define "content" }}
+<style>
+  body.wallet {
+    background: #f7f8fa;
+  }
+  .container-narrow {
+    max-width: 980px;
+  }
+  .card {
+    border: 0;
+    border-radius: 1rem;
+  }
+  .shadow-soft {
+    box-shadow: 0 0.25rem 1rem rgba(0, 0, 0, 0.05);
+  }
+  .metric-card {
+    padding: 1.75rem 1rem;
+  }
+  .wallet-badge {
+    font-size: 0.875rem;
+  }
+</style>
+
+{{ with .Wallet }}
+<div class="container container-narrow py-4">
+  <div class="d-flex flex-wrap justify-content-between align-items-center mb-4 gap-3">
+    <a href="/" class="d-inline-flex align-items-center gap-2 text-decoration-none text-dark fw-semibold fs-4 m-0">
+      <img src="{{ $.LogoDataURI }}" width="36" height="36" alt="OctoPi logo">
+      <span>Portfolio Dashboard</span>
+    </a>
+
+    <div class="btn-group" role="group" aria-label="Fiat currency toggle">
+      <input type="radio" class="btn-check" name="fiatMode" id="modeEUR" value="EUR" autocomplete="off" checked>
+      <label class="btn btn-outline-primary" for="modeEUR"><i class="bi bi-currency-euro me-1"></i>EUR</label>
+
+      <input type="radio" class="btn-check" name="fiatMode" id="modeUSD" value="USD" autocomplete="off">
+      <label class="btn btn-outline-primary" for="modeUSD"><i class="bi bi-currency-dollar me-1"></i>USD</label>
+    </div>
+  </div>
+
+  <div class="card mb-4 shadow-soft">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-center flex-wrap gap-3">
+        <div>
+          <div class="d-flex align-items-center gap-2">
+            <span class="wallet-badge badge text-bg-light border">{{ .Network }}</span>
+          </div>
+          <h5 class="card-title mb-1 mt-2">Wallet summary</h5>
+          <div class="text-muted small">Updated: {{ .Updated }}</div>
+          <div class="small text-muted mt-2">
+            Address: <span>{{ .Address }}</span>
+          </div>
+        </div>
+        <div class="text-end" id="walletSummary"
+             data-balance-sol="{{ printf "%.2f" .BalanceSOL }}"
+             data-rate-eur="{{ printf "%.2f" .FiatRates.EUR }}"
+             data-rate-usd="{{ printf "%.2f" .FiatRates.USD }}">
+          <div class="fs-4 fw-semibold">{{ .BalanceCrypto }}</div>
+          <div class="text-muted" id="walletFiatValue">{{ .BalanceFiat }}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row row-cols-1 row-cols-md-3 g-3">
+    {{ range .Metrics }}
+    <div class="col">
+      <div class="card shadow-soft metric-card h-100">
+        <div class="card-body text-center">
+          <div class="text-muted small d-flex justify-content-center align-items-center gap-1">
+            <span>{{ .Label }}</span>
+            {{ if .Tooltip }}
+            <span data-bs-toggle="tooltip" title="{{ .Tooltip }}">
+              <i class="bi bi-question-circle"></i>
+            </span>
+            {{ end }}
+          </div>
+          <div class="fs-5 fw-semibold mt-1">{{ .Value }}</div>
+          <div class="text-muted small mt-1">{{ .Subtext }}</div>
+        </div>
+      </div>
+    </div>
+    {{ end }}
+  </div>
+
+  <div class="card mt-4 shadow-soft">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h5 class="mb-0">Monthly rewards</h5>
+        <span class="text-muted small">Last 4 months</span>
+      </div>
+      <div id="walletChart" style="height:320px;" data-chart='{{ .ChartJSON }}'></div>
+    </div>
+  </div>
+
+  <div class="card mt-4 shadow-soft">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h5 class="mb-0">Recent rewards</h5>
+        <span class="text-muted small">Last 30 days</span>
+      </div>
+      <div class="table-responsive">
+        <table class="table align-middle mb-0">
+          <thead>
+            <tr>
+              <th scope="col">Date</th>
+              <th scope="col">Type</th>
+              <th class="text-end" scope="col">SOL</th>
+              <th scope="col">Validator</th>
+              <th scope="col">Epoch</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{ range .Rewards }}
+            <tr>
+              <td>{{ .Date }}</td>
+              <td>{{ .Type }}</td>
+              <td class="text-end">{{ .AmountSOL }}</td>
+              <td>{{ .Validator }}</td>
+              <td>{{ .Epoch }}</td>
+            </tr>
+            {{ end }}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="text-center text-muted small mt-4">
+    Mock data for layout preview only.
+  </div>
+</div>
+
+<script>
+  window.addEventListener("load", () => {
+    const summaryEl = document.getElementById("walletSummary");
+    if (!summaryEl) {
+      return;
+    }
+
+    const fiatDisplay = document.getElementById("walletFiatValue");
+    const formatFiat = (currency) => {
+      const balanceSol = parseFloat(summaryEl.dataset.balanceSol);
+      const rate = currency === "USD" ? parseFloat(summaryEl.dataset.rateUsd) : parseFloat(summaryEl.dataset.rateEur);
+      const symbol = currency === "USD" ? "$" : "€";
+      const value = balanceSol * rate;
+      fiatDisplay.textContent = `≈ ${symbol}${value.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+    };
+
+    document.querySelectorAll('input[name="fiatMode"]').forEach((input) => {
+      input.addEventListener("change", () => {
+        if (input.checked) {
+          formatFiat(input.value);
+        }
+      });
+    });
+
+    const defaultMode = document.querySelector('input[name="fiatMode"]:checked');
+    if (defaultMode) {
+      formatFiat(defaultMode.value);
+    }
+
+    if (window.bootstrap?.Tooltip) {
+      document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach((el) => {
+        new window.bootstrap.Tooltip(el);
+      });
+    }
+
+    const chartEl = document.getElementById("walletChart");
+    if (chartEl && chartEl.dataset.chart && window.ApexCharts) {
+      const payload = JSON.parse(chartEl.dataset.chart);
+      const chart = new window.ApexCharts(chartEl, {
+        chart: { type: "bar", height: 320, toolbar: { show: false } },
+        plotOptions: {
+          bar: {
+            borderRadius: 6,
+            columnWidth: "55%",
+          },
+        },
+        dataLabels: { enabled: false },
+        xaxis: { categories: payload.labels },
+        series: payload.series,
+        colors: ["#6f4ef2"],
+        stroke: { show: false },
+        tooltip: {
+          y: {
+            formatter: (val) => `${val.toFixed(2)} SOL`,
+          },
+        },
+      });
+      chart.render();
+    }
+  });
+</script>
+{{ end }}
+{{ end }}

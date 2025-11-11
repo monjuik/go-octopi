@@ -61,3 +61,29 @@ func TestServerIndexRendering(t *testing.T) {
 		})
 	}
 }
+
+func TestWalletPageRendering(t *testing.T) {
+	t.Parallel()
+
+	ts := httptest.NewServer(NewServer())
+	t.Cleanup(ts.Close)
+
+	resp, err := http.Get(ts.URL + "/wallet/demo")
+	if err != nil {
+		t.Fatalf("failed to GET wallet page: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status: got %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read body: %v", err)
+	}
+
+	if !strings.Contains(string(body), "Wallet summary") {
+		t.Fatalf("wallet page missing summary section: %q", body)
+	}
+}
