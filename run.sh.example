@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Copy this file to run.sh (which is gitignored) and replace the placeholder value
+# with your actual Helius API key.
+export HELIUS_API_KEY="paste-your-helius-api-key"
+
+go run ./cmd/web
