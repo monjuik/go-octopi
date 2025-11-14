@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -381,7 +382,10 @@ func TestRPCSolanaClientGetEpochInfo(t *testing.T) {
 					"jsonrpc":"2.0",
 					"id":1,
 					"result":{
-						"epoch":880
+						"epoch":880,
+						"absoluteSlot":123456,
+						"slotIndex":456,
+						"slotsInEpoch":432000
 					}
 				}`
 
@@ -400,6 +404,97 @@ func TestRPCSolanaClientGetEpochInfo(t *testing.T) {
 	}
 	if info == nil || info.Epoch != 880 {
 		t.Fatalf("unexpected epoch info %#v", info)
+	}
+	if info.AbsoluteSlot != 123456 || info.SlotIndex != 456 || info.SlotsInEpoch != 432000 {
+		t.Fatalf("unexpected extended epoch data %#v", info)
+	}
+}
+
+func TestRPCSolanaClientGetEpochBoundaries(t *testing.T) {
+	t.Parallel()
+
+	slotTimes := map[uint64]int64{
+		9999: 1700000500,
+		9899: 1700000000,
+		9799: 1699999300,
+	}
+	var methods []string
+
+	client := &RPCSolanaClient{
+		Endpoint: "http://solana.test",
+		HTTPClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				defer req.Body.Close()
+
+				var captured rpcRequest
+				if err := json.NewDecoder(req.Body).Decode(&captured); err != nil {
+					return nil, err
+				}
+				methods = append(methods, captured.Method)
+
+				switch captured.Method {
+				case "getEpochInfo":
+					resp := `{
+						"jsonrpc":"2.0",
+						"id":1,
+						"result":{
+							"epoch":1000,
+							"absoluteSlot":10050,
+							"slotIndex":50,
+							"slotsInEpoch":100
+						}
+					}`
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(resp)),
+						Header:     make(http.Header),
+					}, nil
+				case "getBlockTime":
+					slotVal, ok := captured.Params[0].(float64)
+					if !ok {
+						t.Fatalf("unexpected slot param %#v", captured.Params[0])
+					}
+					ts, ok := slotTimes[uint64(slotVal)]
+					if !ok {
+						t.Fatalf("unexpected block time lookup for slot %v", slotVal)
+					}
+					resp := fmt.Sprintf(`{
+						"jsonrpc":"2.0",
+						"id":1,
+						"result":%d
+					}`, ts)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(resp)),
+						Header:     make(http.Header),
+					}, nil
+				default:
+					t.Fatalf("unexpected RPC method %s", captured.Method)
+				}
+				return nil, nil
+			}),
+		},
+	}
+
+	minTime := time.Unix(1699999900, 0)
+	entries, err := client.GetEpochBoundaries(context.Background(), minTime)
+	if err != nil {
+		t.Fatalf("GetEpochBoundaries returned error: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 boundaries, got %d (%v)", len(entries), entries)
+	}
+	if entries[0].Epoch != 999 || entries[1].Epoch != 998 {
+		t.Fatalf("unexpected epochs %+v", entries)
+	}
+	if got := entries[0].EndTime.Unix(); got != 1700000500 {
+		t.Fatalf("unexpected first boundary time %d", got)
+	}
+	if got := entries[1].EndTime.Unix(); got != 1700000000 {
+		t.Fatalf("unexpected second boundary time %d", got)
+	}
+	if len(methods) != 4 {
+		t.Fatalf("unexpected RPC calls %v", methods)
 	}
 }
 

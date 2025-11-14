@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -17,6 +18,7 @@ const (
 	solanaMainnetHost  = "mainnet.helius-rpc.com"
 	defaultHTTPTimeout = 5 * time.Second
 	stakeProgramID     = "Stake11111111111111111111111111111111111111"
+	approxSlotDuration = 400 * time.Millisecond
 )
 
 // SolanaClient defines the operations needed by the HTTP layer.
@@ -27,12 +29,14 @@ type SolanaClient interface {
 	GetTransaction(ctx context.Context, signature string) (*TransactionDetail, error)
 	GetInflationReward(ctx context.Context, addresses []string, epoch *uint64) ([]*InflationReward, error)
 	GetEpochInfo(ctx context.Context) (*EpochInfo, error)
+	GetEpochBoundaries(ctx context.Context, minEndTime time.Time) ([]EpochBoundary, error)
 }
 
 // RPCSolanaClient calls the public Solana JSON-RPC endpoint.
 type RPCSolanaClient struct {
 	Endpoint   string
 	HTTPClient *http.Client
+	epochCache *epochCache
 }
 
 // StakeAccount carries parsed information about a delegated stake account.
@@ -83,7 +87,17 @@ type InflationReward struct {
 
 // EpochInfo carries the current epoch metadata.
 type EpochInfo struct {
-	Epoch uint64
+	Epoch        uint64
+	AbsoluteSlot uint64
+	SlotIndex    uint64
+	SlotsInEpoch uint64
+}
+
+// EpochBoundary describes when an epoch completed.
+type EpochBoundary struct {
+	Epoch   uint64
+	EndSlot uint64
+	EndTime time.Time
 }
 
 // GetBalance retrieves the lamport balance for the provided wallet.
@@ -438,8 +452,61 @@ func (c *RPCSolanaClient) GetEpochInfo(ctx context.Context) (*EpochInfo, error) 
 	}
 
 	return &EpochInfo{
-		Epoch: rpcResp.Result.Epoch,
+		Epoch:        rpcResp.Result.Epoch,
+		AbsoluteSlot: rpcResp.Result.AbsoluteSlot,
+		SlotIndex:    rpcResp.Result.SlotIndex,
+		SlotsInEpoch: rpcResp.Result.SlotsInEpoch,
 	}, nil
+}
+
+// GetEpochBoundaries returns metadata about completed epochs covering the provided lookback window.
+func (c *RPCSolanaClient) GetEpochBoundaries(ctx context.Context, minEndTime time.Time) ([]EpochBoundary, error) {
+	cache := c.ensureEpochCache()
+	entries, err := cache.getBoundaries(ctx, minEndTime)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]EpochBoundary, len(entries))
+	copy(result, entries)
+	return result, nil
+}
+
+func (c *RPCSolanaClient) getBlockTime(ctx context.Context, slot uint64) (time.Time, error) {
+	payload := rpcRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "getBlockTime",
+		Params:  []any{slot},
+	}
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(payload); err != nil {
+		return time.Time{}, fmt.Errorf("encode block time request: %w", err)
+	}
+
+	resp, err := c.doRPCRequest(ctx, buf.Bytes())
+	if err != nil {
+		return time.Time{}, fmt.Errorf("rpc request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return time.Time{}, fmt.Errorf("rpc status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var rpcResp rpcGetBlockTimeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		return time.Time{}, fmt.Errorf("decode block time response: %w", err)
+	}
+	if rpcResp.Error != nil {
+		return time.Time{}, fmt.Errorf("rpc error (%d): %s", rpcResp.Error.Code, rpcResp.Error.Message)
+	}
+	if rpcResp.Result == nil {
+		return time.Time{}, fmt.Errorf("block time result missing")
+	}
+
+	return time.Unix(*rpcResp.Result, 0).UTC(), nil
 }
 
 type rpcRequest struct {
@@ -588,6 +655,13 @@ type rpcInflationReward struct {
 	Commission    *int   `json:"commission"`
 }
 
+type rpcGetBlockTimeResponse struct {
+	JSONRPC string    `json:"jsonrpc"`
+	ID      int       `json:"id"`
+	Result  *int64    `json:"result"`
+	Error   *rpcError `json:"error"`
+}
+
 type rpcGetEpochInfoResponse struct {
 	JSONRPC string        `json:"jsonrpc"`
 	ID      int           `json:"id"`
@@ -596,7 +670,10 @@ type rpcGetEpochInfoResponse struct {
 }
 
 type rpcEpochInfo struct {
-	Epoch uint64 `json:"epoch"`
+	Epoch        uint64 `json:"epoch"`
+	AbsoluteSlot uint64 `json:"absoluteSlot"`
+	SlotIndex    uint64 `json:"slotIndex"`
+	SlotsInEpoch uint64 `json:"slotsInEpoch"`
 }
 
 func newRateLimitedHTTPClient(endpoint string) *http.Client {
@@ -662,4 +739,128 @@ func retryAfterDelay(value string) (time.Duration, bool) {
 	}
 
 	return 0, false
+}
+
+func (c *RPCSolanaClient) ensureEpochCache() *epochCache {
+	if c.epochCache != nil {
+		return c.epochCache
+	}
+	c.epochCache = &epochCache{client: c}
+	return c.epochCache
+}
+
+type epochCache struct {
+	client      *RPCSolanaClient
+	mu          sync.Mutex
+	boundaries  []EpochBoundary
+	expiresAt   time.Time
+	coveredFrom time.Time
+}
+
+func (c *epochCache) getBoundaries(ctx context.Context, minEndTime time.Time) ([]EpochBoundary, error) {
+	minEndTime = minEndTime.UTC()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := time.Now()
+	needsRefresh := len(c.boundaries) == 0 || now.After(c.expiresAt) || (!c.coveredFrom.IsZero() && minEndTime.Before(c.coveredFrom))
+
+	if needsRefresh {
+		if err := c.refreshLocked(ctx, minEndTime); err != nil {
+			return nil, err
+		}
+		log.Printf("[epoch-cache] refresh windowStart=%s epochs=%d expiresAt=%s", minEndTime.Format(time.RFC3339), len(c.boundaries), c.expiresAt.Format(time.RFC3339))
+	} else {
+		log.Printf("[epoch-cache] cache hit windowStart=%s epochs=%d expiresAt=%s", minEndTime.Format(time.RFC3339), len(c.boundaries), c.expiresAt.Format(time.RFC3339))
+	}
+
+	results := make([]EpochBoundary, 0, len(c.boundaries))
+	for _, entry := range c.boundaries {
+		if entry.EndTime.Before(minEndTime) {
+			continue
+		}
+		results = append(results, entry)
+	}
+	return results, nil
+}
+
+func (c *epochCache) refreshLocked(ctx context.Context, minEndTime time.Time) error {
+	log.Printf("[epoch-cache] requesting epoch info via RPC")
+	info, err := c.client.GetEpochInfo(ctx)
+	if err != nil {
+		return fmt.Errorf("epoch info: %w", err)
+	}
+	if info == nil {
+		return fmt.Errorf("epoch info: empty response")
+	}
+	if info.SlotsInEpoch == 0 {
+		return fmt.Errorf("epoch info: slotsInEpoch is zero")
+	}
+	if info.SlotIndex > info.SlotsInEpoch {
+		return fmt.Errorf("epoch info: slotIndex %d exceeds %d", info.SlotIndex, info.SlotsInEpoch)
+	}
+	if info.AbsoluteSlot < info.SlotIndex {
+		return fmt.Errorf("epoch info: absoluteSlot %d less than slotIndex %d", info.AbsoluteSlot, info.SlotIndex)
+	}
+
+	currentEpochStartSlot := info.AbsoluteSlot - info.SlotIndex
+	if currentEpochStartSlot == 0 {
+		return fmt.Errorf("epoch info: current epoch start slot is zero")
+	}
+	if info.Epoch == 0 {
+		return fmt.Errorf("epoch info: current epoch is zero")
+	}
+
+	slot := currentEpochStartSlot - 1
+	epoch := info.Epoch - 1
+	log.Printf("[epoch-cache] rebuilding epochs from epoch=%d slot=%d minWindow=%s", epoch, slot, minEndTime.Format(time.RFC3339))
+
+	boundaries := make([]EpochBoundary, 0, 64)
+	for {
+		log.Printf("[epoch-cache] fetching block time via RPC epoch=%d slot=%d", epoch, slot)
+		blockTime, err := c.client.getBlockTime(ctx, slot)
+		if err != nil {
+			return fmt.Errorf("block time slot %d: %w", slot, err)
+		}
+
+		entry := EpochBoundary{
+			Epoch:   epoch,
+			EndSlot: slot,
+			EndTime: blockTime,
+		}
+		boundaries = append(boundaries, entry)
+
+		if blockTime.Before(minEndTime) {
+			log.Printf("[epoch-cache] reached window limit epoch=%d slot=%d ts=%s", epoch, slot, blockTime.Format(time.RFC3339))
+			break
+		}
+		if epoch == 0 {
+			break
+		}
+
+		if slot < info.SlotsInEpoch {
+			log.Printf("[epoch-cache] reached genesis boundary epoch=%d slot=%d", epoch, slot)
+			break
+		}
+		slot -= info.SlotsInEpoch
+		epoch--
+	}
+
+	c.boundaries = boundaries
+	if len(boundaries) > 0 {
+		c.coveredFrom = boundaries[len(boundaries)-1].EndTime
+	} else {
+		c.coveredFrom = time.Time{}
+	}
+	c.expiresAt = estimateEpochExpiry(info)
+	return nil
+}
+
+func estimateEpochExpiry(info *EpochInfo) time.Time {
+	if info == nil || info.SlotsInEpoch == 0 || info.SlotIndex >= info.SlotsInEpoch {
+		return time.Now().Add(5 * time.Minute)
+	}
+	slotsRemaining := info.SlotsInEpoch - info.SlotIndex
+	return time.Now().Add(time.Duration(slotsRemaining) * approxSlotDuration)
 }

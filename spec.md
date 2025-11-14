@@ -103,9 +103,7 @@ Purpose: show staking income analytics for the given wallet.
     - mapping epochs to timestamps via `getBlockTime`.
 
 - **RPC endpoint:**
-  `https://api.mainnet-beta.solana.com` (official public endpoint, free tier).
-  - No registration or API key required.
-  - Default rate limit: ~10 requests per second and ~100 requests per 10 seconds per IP.
+We are using Helius (`https://mainnet.helius-rpc.com/?api-key=...`) and respecting rate limits and [best practices](https://www.helius.dev/docs/rpc/optimization-techniques#efficient-account-queries).
 
 #### Rate Limiting and Retry Logic
 
@@ -131,11 +129,6 @@ Purpose: show staking income analytics for the given wallet.
 
 Wallet data should be cached respecting maximum amount of data for caching. Let's say, we can use up to 200 Mb of RAM for this, we should limit number of wallets to some reasonable number and delete the oldest one before adding a new one, if exceeding limits. We will use LRU for caching.
 
-#### Scalability Roadmap
-
-- When public RPC limits become a bottleneck, migrate to a commercial provider such as **Helius** (`https://mainnet.helius-rpc.com/?api-key=...`).
-  - Helius supports the same JSON-RPC schema as Solana mainnet.
-  - Migration requires changing only the RPC URL.
 
 
 #### Ethereum Data Pipeline

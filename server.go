@@ -34,6 +34,9 @@ const (
 	lamportsPerSOL        = 1_000_000_000
 	heliusAPIKeyEnv       = "HELIUS_API_KEY"
 	heliusMainnetTemplate = "https://mainnet.helius-rpc.com/?api-key=%s"
+	rewardLookbackMonths  = 3
+	rewardDateFormat      = "2006-01-02 15:04"
+	rewardChartMonths     = rewardLookbackMonths + 1
 )
 
 var (
@@ -124,11 +127,13 @@ type WalletMetric struct {
 
 // RewardRow represents a historical reward entry.
 type RewardRow struct {
-	Date      string
-	Type      string
-	AmountSOL string
-	Validator string
-	Epoch     int
+	Date           string
+	Type           string
+	AmountSOL      string
+	AmountSOLValue float64
+	Validator      string
+	Epoch          int
+	Timestamp      time.Time
 }
 
 type walletChart struct {
@@ -165,6 +170,8 @@ func NewServer(opts ...ServerOption) http.Handler {
 		solanaClient: cfg.solanaClient,
 		logger:       cfg.logger,
 	}
+
+	srv.warmupEpochs()
 
 	mux := http.NewServeMux()
 
@@ -244,6 +251,7 @@ func (s *server) handleWallet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	now := time.Now().UTC()
 	s.logger.Printf("wallet request start address=%s", address)
 
 	balanceLamports, err := s.solanaClient.GetBalance(ctx, address)
@@ -280,6 +288,11 @@ func (s *server) handleWallet(w http.ResponseWriter, r *http.Request) {
 	walletView := s.buildWalletData(address, balanceLamports, delegatedLamports)
 	if len(recentRewards) > 0 {
 		walletView.Rewards = recentRewards
+	}
+	if chartJSON, err := buildRewardChartJSON(now, recentRewards); err != nil {
+		s.logger.Printf("reward chart build warning address=%s error=%v", address, err)
+	} else {
+		walletView.ChartJSON = chartJSON
 	}
 
 	s.logger.Printf("wallet request success address=%s lamports=%d balanceSOL=%.9f", address, balanceLamports, walletView.BalanceSOL)
@@ -349,6 +362,45 @@ func demoWalletData() *WalletData {
 		panic(err)
 	}
 
+	rewardEntries := []RewardRow{
+		{
+			Date:           formatRewardDate(time.Date(2025, time.November, 7, 13, 40, 0, 0, time.UTC), 562),
+			Type:           "Reward",
+			AmountSOL:      "0.17",
+			AmountSOLValue: 0.17,
+			Validator:      "Atlas Nodes",
+			Epoch:          562,
+			Timestamp:      time.Date(2025, time.November, 7, 13, 40, 0, 0, time.UTC),
+		},
+		{
+			Date:           formatRewardDate(time.Date(2025, time.November, 5, 8, 15, 0, 0, time.UTC), 561),
+			Type:           "Reward",
+			AmountSOL:      "0.16",
+			AmountSOLValue: 0.16,
+			Validator:      "North Star",
+			Epoch:          561,
+			Timestamp:      time.Date(2025, time.November, 5, 8, 15, 0, 0, time.UTC),
+		},
+		{
+			Date:           formatRewardDate(time.Date(2025, time.November, 1, 11, 5, 0, 0, time.UTC), 560),
+			Type:           "Reward",
+			AmountSOL:      "0.16",
+			AmountSOLValue: 0.16,
+			Validator:      "Atlas Nodes",
+			Epoch:          560,
+			Timestamp:      time.Date(2025, time.November, 1, 11, 5, 0, 0, time.UTC),
+		},
+		{
+			Date:           formatRewardDate(time.Date(2025, time.October, 30, 6, 50, 0, 0, time.UTC), 559),
+			Type:           "Reward",
+			AmountSOL:      "0.15",
+			AmountSOLValue: 0.15,
+			Validator:      "SolGuard",
+			Epoch:          559,
+			Timestamp:      time.Date(2025, time.October, 30, 6, 50, 0, 0, time.UTC),
+		},
+	}
+
 	return &WalletData{
 		Network:       "Solana Mainnet",
 		Updated:       "09 Nov 2025 13:40 UTC",
@@ -368,12 +420,7 @@ func demoWalletData() *WalletData {
 				Tooltip: "Calcuated as XIRR over the last 4 months based on staking rewards and deposits.",
 			},
 		},
-		Rewards: []RewardRow{
-			{Date: "2025-11-07", Type: "Reward", AmountSOL: "0.17", Validator: "Atlas Nodes", Epoch: 562},
-			{Date: "2025-11-05", Type: "Reward", AmountSOL: "0.16", Validator: "North Star", Epoch: 561},
-			{Date: "2025-11-01", Type: "Reward", AmountSOL: "0.16", Validator: "Atlas Nodes", Epoch: 560},
-			{Date: "2025-10-30", Type: "Reward", AmountSOL: "0.15", Validator: "SolGuard", Epoch: 559},
-		},
+		Rewards:   rewardEntries,
 		ChartJSON: template.JS(chartJSON),
 	}
 }
@@ -388,19 +435,23 @@ func (s *server) collectRecentRewards(ctx context.Context, stakeAccounts []Stake
 		return nil, nil
 	}
 
-	epochInfo, err := s.solanaClient.GetEpochInfo(ctx)
+	lookbackStart := rewardWindowStart(time.Now().UTC())
+	boundaries, err := s.solanaClient.GetEpochBoundaries(ctx, lookbackStart)
 	if err != nil {
-		return nil, fmt.Errorf("epoch info: %w", err)
+		return nil, fmt.Errorf("epoch boundaries: %w", err)
 	}
-	if epochInfo == nil {
-		return nil, fmt.Errorf("epoch info: empty response")
+	if len(boundaries) == 0 {
+		return nil, nil
 	}
+	sort.Slice(boundaries, func(i, j int) bool {
+		return boundaries[i].Epoch > boundaries[j].Epoch
+	})
 
-	var targetEpoch uint64
-	if epochInfo.Epoch == 0 {
-		targetEpoch = epochInfo.Epoch
-	} else {
-		targetEpoch = epochInfo.Epoch - 1
+	targetEpochs := make([]uint64, 0, len(boundaries))
+	epochDates := make(map[uint64]time.Time, len(boundaries))
+	for _, boundary := range boundaries {
+		targetEpochs = append(targetEpochs, boundary.Epoch)
+		epochDates[boundary.Epoch] = boundary.EndTime
 	}
 
 	addresses := make([]string, 0, len(stakeAccounts))
@@ -408,47 +459,141 @@ func (s *server) collectRecentRewards(ctx context.Context, stakeAccounts []Stake
 		addresses = append(addresses, account.Address)
 	}
 
-	rewards, err := s.solanaClient.GetInflationReward(ctx, addresses, &targetEpoch)
-	if err != nil {
-		return nil, fmt.Errorf("inflation reward fetch: %w", err)
-	}
-
-	rewardRows := make([]RewardRow, 0, len(rewards))
-	for i, reward := range rewards {
-		if reward == nil {
-			continue
-		}
-		if reward.Amount == 0 {
-			continue
+	rewardRows := make([]RewardRow, 0, len(stakeAccounts)*len(targetEpochs))
+	for _, epoch := range targetEpochs {
+		rewards, err := s.solanaClient.GetInflationReward(ctx, addresses, &epoch)
+		if err != nil {
+			return nil, fmt.Errorf("inflation reward fetch epoch %d: %w", epoch, err)
 		}
 
-		account := stakeAccounts[i]
-		amountSOL := float64(reward.Amount) / float64(lamportsPerSOL)
+		for i, reward := range rewards {
+			if reward == nil || reward.Amount == 0 {
+				continue
+			}
 
-		s.logger.Printf(
-			"inflation reward stake=%s epoch=%d lamports=%d sol=%.9f postBalance=%d commission=%v vote=%s effectiveSlot=%d",
-			account.Address,
-			reward.Epoch,
-			reward.Amount,
-			amountSOL,
-			reward.PostBalance,
-			reward.Commission,
-			account.VoteAccount,
-			reward.EffectiveSlot,
-		)
+			account := stakeAccounts[i]
+			amountSOL := float64(reward.Amount) / float64(lamportsPerSOL)
 
-		rewardRows = append(rewardRows, RewardRow{
-			Date:      fmt.Sprintf("Epoch %d", reward.Epoch),
-			Type:      "Inflation Reward",
-			AmountSOL: formatNumber(amountSOL),
-			Validator: account.VoteAccount,
-			Epoch:     int(reward.Epoch),
-		})
+			s.logger.Printf(
+				"inflation reward stake=%s epoch=%d lamports=%d sol=%.9f postBalance=%d commission=%v vote=%s effectiveSlot=%d",
+				account.Address,
+				reward.Epoch,
+				reward.Amount,
+				amountSOL,
+				reward.PostBalance,
+				reward.Commission,
+				account.VoteAccount,
+				reward.EffectiveSlot,
+			)
+
+			rewardRows = append(rewardRows, RewardRow{
+				Date:           formatRewardDate(epochDates[reward.Epoch], reward.Epoch),
+				Type:           "Staking Reward",
+				AmountSOL:      formatNumber(amountSOL),
+				AmountSOLValue: amountSOL,
+				Validator:      account.VoteAccount,
+				Epoch:          int(reward.Epoch),
+				Timestamp:      epochDates[reward.Epoch],
+			})
+		}
 	}
 
 	sort.Slice(rewardRows, func(i, j int) bool {
+		ti := rewardRows[i].Timestamp
+		tj := rewardRows[j].Timestamp
+		if !ti.IsZero() && !tj.IsZero() && !ti.Equal(tj) {
+			return ti.After(tj)
+		}
 		return rewardRows[i].Epoch > rewardRows[j].Epoch
 	})
 
 	return rewardRows, nil
+}
+
+func rewardWindowStart(now time.Time) time.Time {
+	currentMonthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	return currentMonthStart.AddDate(0, -rewardLookbackMonths, 0)
+}
+
+func formatRewardDate(ts time.Time, epoch uint64) string {
+	if ts.IsZero() {
+		return fmt.Sprintf("Epoch %d", epoch)
+	}
+	return ts.UTC().Format(rewardDateFormat) + " UTC"
+}
+
+func buildRewardChartJSON(now time.Time, rewards []RewardRow) (template.JS, error) {
+	payload := rewardChartPayload(now, rewards)
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return template.JS(data), nil
+}
+
+func rewardChartPayload(now time.Time, rewards []RewardRow) walletChart {
+	start := rewardWindowStart(now)
+	labels := make([]string, rewardChartMonths)
+	data := make([]float64, rewardChartMonths)
+
+	for i := 0; i < rewardChartMonths; i++ {
+		month := start.AddDate(0, i, 0)
+		labels[i] = month.Format("Jan")
+	}
+
+	for _, reward := range rewards {
+		if reward.Timestamp.IsZero() {
+			continue
+		}
+		month := monthFloor(reward.Timestamp)
+		index := monthsBetween(start, month)
+		if index < 0 || index >= rewardChartMonths {
+			continue
+		}
+		data[index] += reward.AmountSOLValue
+	}
+
+	return walletChart{
+		Labels: labels,
+		Series: []chartSeries{
+			{
+				Name: "Rewards (SOL)",
+				Data: data,
+			},
+		},
+	}
+}
+
+func monthFloor(t time.Time) time.Time {
+	return time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, time.UTC)
+}
+
+func monthsBetween(start, target time.Time) int {
+	return (target.Year()-start.Year())*12 + int(target.Month()) - int(start.Month())
+}
+
+func (s *server) warmupEpochs() {
+	if s.solanaClient == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	windowStart := rewardWindowStart(time.Now().UTC())
+	if s.logger != nil {
+		s.logger.Printf("epoch warmup start windowStart=%s", windowStart.Format(time.RFC3339))
+	}
+
+	boundaries, err := s.solanaClient.GetEpochBoundaries(ctx, windowStart)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Printf("epoch warmup warning windowStart=%s error=%v", windowStart.Format(time.RFC3339), err)
+		}
+		return
+	}
+
+	if s.logger != nil {
+		s.logger.Printf("epoch warmup complete windowStart=%s epochs=%d", windowStart.Format(time.RFC3339), len(boundaries))
+	}
 }

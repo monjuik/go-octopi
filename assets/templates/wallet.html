@@ -52,7 +52,7 @@
           </div>
           {{ if gt .DelegatedSOL 0.0 }}
           <div class="small text-muted">
-            Delegated: <span>{{ printf "%.2f SOL" .DelegatedSOL }}</span>
+            Delegated: <span>{{ .DelegatedSOL }}</span>
           </div>
           {{ end }}
         </div>
@@ -102,7 +102,7 @@
     <div class="card-body">
       <div class="d-flex justify-content-between align-items-center mb-3">
         <h5 class="mb-0">Recent rewards</h5>
-        <span class="text-muted small">Last 30 days</span>
+        <span class="text-muted small">Last 3 months</span>
       </div>
       <div class="table-responsive">
         <table class="table align-middle mb-0">
@@ -190,12 +190,17 @@
         },
         dataLabels: { enabled: false },
         xaxis: { categories: payload.labels },
+        yaxis: {
+          labels: {
+            formatter: (val) => Number(val).toFixed(5),
+          },
+        },
         series: payload.series,
         colors: ["#6f4ef2"],
         stroke: { show: false },
         tooltip: {
           y: {
-            formatter: (val) => `${val.toFixed(2)} SOL`,
+            formatter: (val) => `${Number(val).toFixed(9)} SOL`,
           },
         },
       });

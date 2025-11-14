@@ -5,16 +5,18 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestServerIndexRendering(t *testing.T) {
 	ensureHeliusEnv(t)
 
-	handler := NewServer()
+	handler := NewServer(WithSolanaClient(&stubSolanaClient{}))
 
 	tests := []struct {
 		name   string
@@ -56,7 +58,7 @@ func TestServerIndexRendering(t *testing.T) {
 func TestWalletPageRendering(t *testing.T) {
 	ensureHeliusEnv(t)
 
-	rec := performRequest(t, NewServer(), http.MethodGet, "/wallet/demo")
+	rec := performRequest(t, NewServer(WithSolanaClient(&stubSolanaClient{})), http.MethodGet, "/wallet/demo")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("unexpected status: got %d, want %d", rec.Code, http.StatusOK)
 	}
@@ -72,19 +74,21 @@ func TestWalletAddressRouteRendersBalance(t *testing.T) {
 	const lamports = 3450000000
 	const delegatedLamports = 1230000000
 	const rewardLamports = 170000000
-	const currentEpoch = 880
-	const previousEpoch = currentEpoch - 1
+	const previousEpoch = 879
+	rewardEndTime := time.Date(2024, time.January, 15, 12, 0, 0, 0, time.UTC)
 	stubClient := &stubSolanaClient{
 		balance: lamports,
-		epochInfo: &EpochInfo{
-			Epoch: currentEpoch,
+		epochBoundaries: []EpochBoundary{
+			{Epoch: previousEpoch, EndTime: rewardEndTime},
 		},
-		inflationRewards: map[string]*InflationReward{
-			"Stake111": {
-				Epoch:         previousEpoch,
-				EffectiveSlot: 12345,
-				Amount:        rewardLamports,
-				PostBalance:   delegatedLamports + rewardLamports,
+		inflationRewards: map[uint64]map[string]*InflationReward{
+			previousEpoch: {
+				"Stake111": {
+					Epoch:         previousEpoch,
+					EffectiveSlot: 12345,
+					Amount:        rewardLamports,
+					PostBalance:   delegatedLamports + rewardLamports,
+				},
 			},
 		},
 		stakeAccounts: []StakeAccount{
@@ -114,6 +118,9 @@ func TestWalletAddressRouteRendersBalance(t *testing.T) {
 	if got := stubClient.inflationRequests[0]; len(got) != 1 || got[0] != "Stake111" {
 		t.Fatalf("unexpected inflation reward request addresses: %#v", got)
 	}
+	if len(stubClient.inflationEpochs) != 1 || stubClient.inflationEpochs[0] != previousEpoch {
+		t.Fatalf("unexpected epochs requested: %#v", stubClient.inflationEpochs)
+	}
 
 	expectedBalance := fmt.Sprintf(">%s SOL<", formatNumber(float64(lamports+delegatedLamports)/lamportsPerSOL))
 	if !strings.Contains(rec.Body.String(), expectedBalance) {
@@ -124,7 +131,7 @@ func TestWalletAddressRouteRendersBalance(t *testing.T) {
 		t.Fatalf("wallet view missing delegated amount: %q", rec.Body.String())
 	}
 
-	expectedDate := fmt.Sprintf("Epoch %d", previousEpoch)
+	expectedDate := rewardEndTime.UTC().Format(rewardDateFormat) + " UTC"
 	if !strings.Contains(rec.Body.String(), expectedDate) {
 		t.Fatalf("wallet view missing reward date %q: body=%q", expectedDate, rec.Body.String())
 	}
@@ -136,6 +143,9 @@ func TestWalletAddressRouteRendersBalance(t *testing.T) {
 
 	if !strings.Contains(rec.Body.String(), "Vote111") {
 		t.Fatalf("wallet view missing validator Vote111: %q", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "Rewards (SOL)") {
+		t.Fatalf("wallet view missing reward chart payload: %q", rec.Body.String())
 	}
 }
 
@@ -168,6 +178,41 @@ func TestWalletAddressRouteValidatesInput(t *testing.T) {
 	}
 }
 
+func TestRewardChartPayload(t *testing.T) {
+	now := time.Date(2025, time.November, 15, 0, 0, 0, 0, time.UTC)
+	rewards := []RewardRow{
+		{Timestamp: time.Date(2025, time.November, 2, 9, 0, 0, 0, time.UTC), AmountSOLValue: 0.3},
+		{Timestamp: time.Date(2025, time.September, 18, 12, 0, 0, 0, time.UTC), AmountSOLValue: 0.1},
+		{Timestamp: time.Date(2025, time.August, 5, 7, 0, 0, 0, time.UTC), AmountSOLValue: 0.2},
+		{Timestamp: time.Date(2025, time.July, 30, 23, 0, 0, 0, time.UTC), AmountSOLValue: 0.4},
+	}
+
+	payload := rewardChartPayload(now, rewards)
+
+	expectedLabels := []string{"Aug", "Sep", "Oct", "Nov"}
+	if len(payload.Labels) != len(expectedLabels) {
+		t.Fatalf("unexpected number of labels: %#v", payload.Labels)
+	}
+	for i, label := range payload.Labels {
+		if label != expectedLabels[i] {
+			t.Fatalf("unexpected label at %d: got %s want %s", i, label, expectedLabels[i])
+		}
+	}
+
+	if len(payload.Series) != 1 {
+		t.Fatalf("expected single series, got %d", len(payload.Series))
+	}
+	expectedData := []float64{0.2, 0.1, 0.0, 0.3}
+	if len(payload.Series[0].Data) != len(expectedData) {
+		t.Fatalf("unexpected data points: %#v", payload.Series[0].Data)
+	}
+	for i, got := range payload.Series[0].Data {
+		if math.Abs(got-expectedData[i]) > 1e-9 {
+			t.Fatalf("unexpected data at %d: got %.9f want %.9f", i, got, expectedData[i])
+		}
+	}
+}
+
 type stubSolanaClient struct {
 	balance             uint64
 	err                 error
@@ -183,9 +228,13 @@ type stubSolanaClient struct {
 	transactionsReq     []string
 	epochInfo           *EpochInfo
 	epochErr            error
-	inflationRewards    map[string]*InflationReward
+	epochBoundaries     []EpochBoundary
+	epochBoundariesErr  error
+	epochBoundaryReqs   []time.Time
+	inflationRewards    map[uint64]map[string]*InflationReward
 	inflationErr        error
 	inflationRequests   [][]string
+	inflationEpochs     []uint64
 }
 
 func (s *stubSolanaClient) GetBalance(_ context.Context, address string) (uint64, error) {
@@ -232,18 +281,41 @@ func (s *stubSolanaClient) GetTransaction(_ context.Context, signature string) (
 
 func (s *stubSolanaClient) GetInflationReward(_ context.Context, addresses []string, epoch *uint64) ([]*InflationReward, error) {
 	s.inflationRequests = append(s.inflationRequests, append([]string(nil), addresses...))
+	if epoch != nil {
+		s.inflationEpochs = append(s.inflationEpochs, *epoch)
+	}
 	if s.inflationErr != nil {
 		return nil, s.inflationErr
 	}
+	var rewardsForEpoch map[string]*InflationReward
+	if epoch != nil {
+		rewardsForEpoch = s.inflationRewards[*epoch]
+	}
 	results := make([]*InflationReward, len(addresses))
 	for i, addr := range addresses {
-		reward, ok := s.inflationRewards[addr]
-		if !ok || reward == nil {
+		var reward *InflationReward
+		if rewardsForEpoch != nil {
+			reward = rewardsForEpoch[addr]
+		}
+		if reward == nil {
 			continue
 		}
 		copyReward := *reward
 		results[i] = &copyReward
 	}
+	return results, nil
+}
+
+func (s *stubSolanaClient) GetEpochBoundaries(_ context.Context, minEndTime time.Time) ([]EpochBoundary, error) {
+	if s.epochBoundariesErr != nil {
+		return nil, s.epochBoundariesErr
+	}
+	s.epochBoundaryReqs = append(s.epochBoundaryReqs, minEndTime)
+	if len(s.epochBoundaries) == 0 {
+		return nil, nil
+	}
+	results := make([]EpochBoundary, len(s.epochBoundaries))
+	copy(results, s.epochBoundaries)
 	return results, nil
 }
 
