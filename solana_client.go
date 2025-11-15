@@ -3,11 +3,14 @@ package gooctopi
 import (
 	"bytes"
 	"context"
+	"encoding/gob"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,7 +28,10 @@ const (
 var (
 	solanaRPCLogger = NewLogger("solana-rpc")
 	epochLog        = NewLogger("epoch-cache")
+	epochCachePath  string
 )
+
+const epochCacheFilename = "sol-epochs.gob"
 
 // ErrEventsUnsupported indicates that the RPC endpoint does not implement getEvents.
 var ErrEventsUnsupported = errors.New("solana getEvents not supported on this endpoint")
@@ -1353,8 +1359,10 @@ func (c *RPCSolanaClient) ensureEpochCache() *epochCache {
 	if c.epochCache != nil {
 		return c.epochCache
 	}
-	c.epochCache = &epochCache{client: c}
-	return c.epochCache
+	cache := &epochCache{client: c}
+	cache.loadFromDisk()
+	c.epochCache = cache
+	return cache
 }
 
 type epochCache struct {
@@ -1363,6 +1371,12 @@ type epochCache struct {
 	boundaries  []EpochBoundary
 	expiresAt   time.Time
 	coveredFrom time.Time
+}
+
+type epochCacheSnapshot struct {
+	Boundaries  []EpochBoundary
+	ExpiresAt   time.Time
+	CoveredFrom time.Time
 }
 
 func (c *epochCache) getBoundaries(ctx context.Context, minEndTime time.Time) ([]EpochBoundary, error) {
@@ -1462,6 +1476,7 @@ func (c *epochCache) refreshLocked(ctx context.Context, minEndTime time.Time) er
 		c.coveredFrom = time.Time{}
 	}
 	c.expiresAt = estimateEpochExpiry(info)
+	c.persistLocked()
 	return nil
 }
 
@@ -1471,4 +1486,81 @@ func estimateEpochExpiry(info *EpochInfo) time.Time {
 	}
 	slotsRemaining := info.SlotsInEpoch - info.SlotIndex
 	return time.Now().Add(time.Duration(slotsRemaining) * approxSlotDuration)
+}
+
+func (c *epochCache) loadFromDisk() {
+	path := epochCacheFilePath()
+	file, err := os.Open(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			epochLog.Printf("epoch cache read warning path=%s error=%v", path, err)
+		}
+		return
+	}
+	defer file.Close()
+
+	epochLog.Printf("epoch cache read start path=%s", path)
+	var snapshot epochCacheSnapshot
+	if err := gob.NewDecoder(file).Decode(&snapshot); err != nil {
+		epochLog.Printf("epoch cache read warning path=%s error=%v", path, err)
+		return
+	}
+	if len(snapshot.Boundaries) == 0 {
+		epochLog.Printf("epoch cache read warning path=%s error=empty snapshot", path)
+		return
+	}
+
+	c.boundaries = snapshot.Boundaries
+	c.expiresAt = snapshot.ExpiresAt
+	c.coveredFrom = snapshot.CoveredFrom
+	epochLog.Printf("epoch cache read complete path=%s epochs=%d expiresAt=%s", path, len(snapshot.Boundaries), snapshot.ExpiresAt.Format(time.RFC3339))
+}
+
+func (c *epochCache) persistLocked() {
+	snapshot := epochCacheSnapshot{
+		Boundaries:  append([]EpochBoundary(nil), c.boundaries...),
+		ExpiresAt:   c.expiresAt,
+		CoveredFrom: c.coveredFrom,
+	}
+	persistEpochSnapshot(snapshot)
+}
+
+func persistEpochSnapshot(snapshot epochCacheSnapshot) {
+	path := epochCacheFilePath()
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "sol-epochs-*.tmp")
+	if err != nil {
+		epochLog.Printf("epoch cache write warning path=%s error=%v", path, err)
+		return
+	}
+
+	enc := gob.NewEncoder(tmp)
+	if err := enc.Encode(snapshot); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		epochLog.Printf("epoch cache write warning path=%s error=%v", path, err)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		epochLog.Printf("epoch cache write warning path=%s error=%v", path, err)
+		return
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		os.Remove(tmp.Name())
+		epochLog.Printf("epoch cache write warning path=%s error=%v", path, err)
+		return
+	}
+	epochLog.Printf("epoch cache write complete path=%s epochs=%d", path, len(snapshot.Boundaries))
+}
+
+func epochCacheFilePath() string {
+	if epochCachePath != "" {
+		return epochCachePath
+	}
+	exePath, err := os.Executable()
+	if err != nil {
+		return epochCacheFilename
+	}
+	return filepath.Join(filepath.Dir(exePath), epochCacheFilename)
 }

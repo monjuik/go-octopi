@@ -3,10 +3,13 @@ package gooctopi
 import (
 	"bytes"
 	"context"
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -673,6 +676,90 @@ func TestRPCSolanaClientDoesNotRetryWithoutRetryAfter(t *testing.T) {
 
 	if calls != 1 {
 		t.Fatalf("expected single request, got %d", calls)
+	}
+}
+
+func TestEpochCacheLoadFromDisk(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "sol-epochs.gob")
+	prevPath := epochCachePath
+	epochCachePath = path
+	defer func() { epochCachePath = prevPath }()
+
+	wantCovered := time.Unix(1700000000, 0).UTC()
+	wantExpires := time.Now().Add(30 * time.Minute).UTC()
+	snapshot := epochCacheSnapshot{
+		Boundaries: []EpochBoundary{
+			{Epoch: 99, EndSlot: 12345, EndTime: wantCovered},
+		},
+		ExpiresAt:   wantExpires,
+		CoveredFrom: wantCovered,
+	}
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(snapshot); err != nil {
+		t.Fatalf("failed to encode snapshot: %v", err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatalf("failed to write snapshot: %v", err)
+	}
+
+	cache := &epochCache{}
+	cache.loadFromDisk()
+
+	if len(cache.boundaries) != 1 {
+		t.Fatalf("expected 1 boundary, got %d", len(cache.boundaries))
+	}
+	if cache.boundaries[0].Epoch != 99 || cache.boundaries[0].EndSlot != 12345 {
+		t.Fatalf("unexpected boundary %+v", cache.boundaries[0])
+	}
+	if !cache.coveredFrom.Equal(wantCovered) {
+		t.Fatalf("unexpected coveredFrom %s", cache.coveredFrom)
+	}
+	if !cache.expiresAt.Equal(wantExpires) {
+		t.Fatalf("unexpected expiresAt %s want %s", cache.expiresAt, wantExpires)
+	}
+}
+
+func TestEpochCachePersistLockedWritesFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "sol-epochs.gob")
+	prevPath := epochCachePath
+	epochCachePath = path
+	defer func() { epochCachePath = prevPath }()
+
+	boundary := EpochBoundary{
+		Epoch:   77,
+		EndSlot: 999,
+		EndTime: time.Unix(1700001000, 0).UTC(),
+	}
+	expiry := time.Now().Add(time.Hour).UTC()
+
+	cache := &epochCache{
+		boundaries:  []EpochBoundary{boundary},
+		expiresAt:   expiry,
+		coveredFrom: boundary.EndTime,
+	}
+	cache.persistLocked()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read snapshot: %v", err)
+	}
+	var snapshot epochCacheSnapshot
+	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&snapshot); err != nil {
+		t.Fatalf("failed to decode snapshot: %v", err)
+	}
+	if len(snapshot.Boundaries) != 1 {
+		t.Fatalf("expected 1 boundary, got %d", len(snapshot.Boundaries))
+	}
+	if snapshot.Boundaries[0].Epoch != boundary.Epoch || snapshot.Boundaries[0].EndSlot != boundary.EndSlot {
+		t.Fatalf("mismatched boundary %+v", snapshot.Boundaries[0])
+	}
+	if !snapshot.ExpiresAt.Equal(expiry) {
+		t.Fatalf("unexpected expiresAt %s want %s", snapshot.ExpiresAt, expiry)
+	}
+	if !snapshot.CoveredFrom.Equal(boundary.EndTime) {
+		t.Fatalf("unexpected coveredFrom %s want %s", snapshot.CoveredFrom, boundary.EndTime)
 	}
 }
 
