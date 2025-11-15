@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"math"
 	"net/http"
 	"os"
 	"regexp"
@@ -29,19 +30,24 @@ var (
 )
 
 const (
-	defaultFooter         = "© 2025 OctoPi · Made with ❤️ using Bootstrap, ApexCharts, Helius, and Go"
-	lamportsPerSOL        = 1_000_000_000
-	heliusAPIKeyEnv       = "HELIUS_API_KEY"
-	heliusMainnetTemplate = "https://mainnet.helius-rpc.com/?api-key=%s"
-	rewardLookbackMonths  = 3
-	rewardDateFormat      = "2006-01-02 15:04"
-	rewardChartMonths     = rewardLookbackMonths + 1
+	defaultFooter                = "© 2025 OctoPi · Made with ❤️ using Bootstrap, ApexCharts, Helius, and Go"
+	lamportsPerSOL               = 1_000_000_000
+	heliusAPIKeyEnv              = "HELIUS_API_KEY"
+	heliusMainnetTemplate        = "https://mainnet.helius-rpc.com/?api-key=%s"
+	rewardLookbackMonths         = 3
+	rewardDateFormat             = "2006-01-02 15:04"
+	rewardChartMonths            = rewardLookbackMonths + 1
+	walletRewardMetricWindowDays = 30
+	defaultAnnualReturnPercent   = 8.26
+	walletAnnualReturnTooltip    = "Calcuated as XIRR over the last 4 months based on staking rewards and deposits."
+	debugXIRREnv                 = "OCTOPI_DEBUG_XIRR"
 )
 
 var (
 	defaultFiatRates     = FiatRates{EUR: 160.0, USD: 180.0}
 	defaultServerLogger  = NewLogger("octopi")
 	solanaAddressPattern = regexp.MustCompile(`^[1-9A-HJ-NP-Za-km-z]{32,44}$`)
+	debugXIRREnabled     = os.Getenv(debugXIRREnv) == "1"
 )
 
 type server struct {
@@ -253,6 +259,7 @@ func (s *server) handleWallet(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	now := time.Now().UTC()
+	lookbackStart := rewardWindowStart(now)
 	s.logger.Printf("wallet request start address=%s", address)
 
 	balanceLamports, err := s.solanaClient.GetBalance(ctx, address)
@@ -281,12 +288,25 @@ func (s *server) handleWallet(w http.ResponseWriter, r *http.Request) {
 		)
 	}
 
-	recentRewards, rewardsErr := s.collectRecentRewards(ctx, stakeAccounts)
+	boundaries, boundaryErr := s.solanaClient.GetEpochBoundaries(ctx, lookbackStart)
+	if boundaryErr != nil {
+		s.logger.Printf("epoch boundaries fetch warning address=%s error=%v", address, boundaryErr)
+	}
+
+	recentRewards, rewardsErr := s.collectRecentRewards(ctx, stakeAccounts, boundaries)
 	if rewardsErr != nil {
 		s.logger.Printf("stake rewards fetch warning address=%s error=%v", address, rewardsErr)
 	}
 
 	walletView := s.buildWalletData(address, balanceLamports, delegatedLamports)
+	var epochInfo *EpochInfo
+	if info, err := s.solanaClient.GetEpochInfo(ctx); err != nil {
+		s.logger.Printf("epoch info fetch warning address=%s error=%v", address, err)
+	} else {
+		epochInfo = info
+	}
+
+	walletView.Metrics = buildWalletMetrics(now, walletView.DelegatedSOL, recentRewards, boundaries, epochInfo)
 	if len(recentRewards) > 0 {
 		walletView.Rewards = recentRewards
 	}
@@ -326,6 +346,337 @@ func (s *server) buildWalletData(address string, lamports uint64, delegatedLampo
 	}
 }
 
+func buildWalletMetrics(now time.Time, delegatedSOL float64, rewards []RewardRow, boundaries []EpochBoundary, epochInfo *EpochInfo) []WalletMetric {
+	rewardCutoff := now.AddDate(0, 0, -walletRewardMetricWindowDays)
+	rewardSum := sumRewardsSince(rewards, rewardCutoff)
+	annualReturn := defaultAnnualReturnPercent
+
+	if delegatedSOL > 0 {
+		if computed, ok := computeAnnualReturnPercent(now, delegatedSOL, rewards, boundaries, epochInfo); ok && !math.IsNaN(computed) {
+			annualReturn = computed
+		}
+	}
+
+	return []WalletMetric{
+		{
+			Label:   "Staked Balance",
+			Value:   fmt.Sprintf("%s SOL", formatNumber(delegatedSOL)),
+			Subtext: "Currently delegated",
+		},
+		{
+			Label:   "30d Rewards",
+			Value:   fmt.Sprintf("%s SOL", formatNumber(rewardSum)),
+			Subtext: "Last 30 days",
+		},
+		{
+			Label:   "Annual Return",
+			Value:   fmt.Sprintf("%.2f%%", annualReturn),
+			Subtext: "Projected APY",
+			Tooltip: walletAnnualReturnTooltip,
+		},
+	}
+}
+
+func sumRewardsSince(rewards []RewardRow, cutoff time.Time) float64 {
+	var total float64
+	for _, reward := range rewards {
+		if !reward.Timestamp.IsZero() && reward.Timestamp.Before(cutoff) {
+			continue
+		}
+		total += reward.AmountSOLValue
+	}
+	return total
+}
+
+func computeAnnualReturnPercent(now time.Time, delegatedSOL float64, rewards []RewardRow, boundaries []EpochBoundary, epochInfo *EpochInfo) (float64, bool) {
+	if delegatedSOL <= 0 || len(rewards) == 0 {
+		return 0, false
+	}
+
+	flows, err := buildCashFlows(now, delegatedSOL, rewards, boundaries, epochInfo)
+	if err != nil || len(flows) < 2 {
+		return 0, false
+	}
+
+	logXIRRFlows(flows)
+	rate, ok := xirr(flows)
+	if !ok {
+		return 0, false
+	}
+	logXIRRRate(rate)
+	return rate * 100, true
+}
+
+type cashFlow struct {
+	when   time.Time
+	amount float64
+}
+
+func buildCashFlows(now time.Time, delegatedSOL float64, rewards []RewardRow, boundaries []EpochBoundary, epochInfo *EpochInfo) ([]cashFlow, error) {
+	earliest := earliestReward(rewards)
+	if earliest == nil {
+		return nil, fmt.Errorf("no reward timestamps available")
+	}
+
+	start, ok := epochStartTime(uint64(earliest.Epoch), boundaries)
+	if !ok {
+		duration := estimateEpochDuration(boundaries)
+		if duration <= 0 {
+			duration = 72 * time.Hour
+		}
+		start = earliest.Timestamp.Add(-duration)
+	}
+
+	flows := []cashFlow{
+		{when: start, amount: -delegatedSOL},
+	}
+
+	for _, reward := range rewards {
+		if reward.AmountSOLValue == 0 || reward.Timestamp.IsZero() {
+			continue
+		}
+		flows = append(flows, cashFlow{
+			when:   reward.Timestamp,
+			amount: reward.AmountSOLValue,
+		})
+	}
+
+	end := estimateCurrentEpochEnd(now, epochInfo)
+	if end.Before(flows[len(flows)-1].when) || end.Equal(flows[len(flows)-1].when) {
+		end = flows[len(flows)-1].when.Add(time.Hour)
+	}
+	flows = append(flows, cashFlow{when: end, amount: delegatedSOL})
+
+	sort.Slice(flows, func(i, j int) bool {
+		return flows[i].when.Before(flows[j].when)
+	})
+	return flows, nil
+}
+
+func earliestReward(rewards []RewardRow) *RewardRow {
+	var selected *RewardRow
+	for i := range rewards {
+		reward := &rewards[i]
+		if reward.Timestamp.IsZero() || reward.Epoch <= 0 {
+			continue
+		}
+		if selected == nil || reward.Timestamp.Before(selected.Timestamp) {
+			selected = reward
+		}
+	}
+	return selected
+}
+
+func epochStartTime(epoch uint64, boundaries []EpochBoundary) (time.Time, bool) {
+	if epoch == 0 {
+		return time.Time{}, false
+	}
+	target := epoch - 1
+	var start time.Time
+	for _, boundary := range boundaries {
+		if boundary.Epoch != target {
+			continue
+		}
+		if start.IsZero() || boundary.EndTime.After(start) {
+			start = boundary.EndTime
+		}
+	}
+	if start.IsZero() {
+		return time.Time{}, false
+	}
+	return start, true
+}
+
+func estimateEpochDuration(boundaries []EpochBoundary) time.Duration {
+	const fallback = 72 * time.Hour
+	if len(boundaries) < 2 {
+		return fallback
+	}
+	sorted := append([]EpochBoundary(nil), boundaries...)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].EndTime.After(sorted[j].EndTime)
+	})
+
+	var total time.Duration
+	count := 0
+	for i := 0; i < len(sorted)-1; i++ {
+		diff := sorted[i].EndTime.Sub(sorted[i+1].EndTime)
+		if diff <= 0 {
+			continue
+		}
+		total += diff
+		count++
+	}
+	if count == 0 {
+		return fallback
+	}
+	return total / time.Duration(count)
+}
+
+func estimateCurrentEpochEnd(now time.Time, info *EpochInfo) time.Time {
+	const fallback = 24 * time.Hour
+	if info == nil || info.SlotsInEpoch == 0 {
+		return now.Add(fallback)
+	}
+	slotsRemaining := info.SlotsInEpoch
+	if info.SlotIndex < info.SlotsInEpoch {
+		slotsRemaining = info.SlotsInEpoch - info.SlotIndex
+	}
+	if slotsRemaining <= 0 {
+		return now.Add(fallback)
+	}
+	duration := max(time.Duration(slotsRemaining)*approxSlotDuration, time.Hour)
+	return now.Add(duration)
+}
+
+func xirr(flows []cashFlow) (float64, bool) {
+	if len(flows) < 2 {
+		return 0, false
+	}
+	if rate, ok := xirrNewton(flows, 0.1); ok {
+		return rate, true
+	}
+	low, high, ok := bracketXIRR(flows)
+	if !ok {
+		return 0, false
+	}
+	return bisectXIRR(flows, low, high)
+}
+
+func xirrNewton(flows []cashFlow, guess float64) (float64, bool) {
+	rate := guess
+	for range 100 {
+		npv := xnpv(rate, flows)
+		if math.Abs(npv) < 1e-8 {
+			return rate, true
+		}
+		derivative := xnpvDerivative(rate, flows)
+		if derivative == 0 || math.IsNaN(derivative) {
+			break
+		}
+		next := rate - npv/derivative
+		if math.IsNaN(next) || math.IsInf(next, 0) || next <= -0.999999 {
+			break
+		}
+		if math.Abs(next-rate) < 1e-8 {
+			return next, true
+		}
+		rate = next
+	}
+	return 0, false
+}
+
+func bracketXIRR(flows []cashFlow) (float64, float64, bool) {
+	points := []float64{-0.9, -0.5, -0.2, 0.0, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 7.5, 10.0}
+	prev := points[0]
+	prevNPV := xnpv(prev, flows)
+	for _, point := range points[1:] {
+		currentNPV := xnpv(point, flows)
+		if math.IsNaN(prevNPV) || math.IsNaN(currentNPV) {
+			prev = point
+			prevNPV = currentNPV
+			continue
+		}
+		if prevNPV == 0 {
+			return prev, prev, true
+		}
+		if prevNPV*currentNPV < 0 {
+			return prev, point, true
+		}
+		prev = point
+		prevNPV = currentNPV
+	}
+	return 0, 0, false
+}
+
+func bisectXIRR(flows []cashFlow, low, high float64) (float64, bool) {
+	npvLow := xnpv(low, flows)
+	npvHigh := xnpv(high, flows)
+	if math.IsNaN(npvLow) || math.IsNaN(npvHigh) || npvLow*npvHigh > 0 {
+		return 0, false
+	}
+	for i := 0; i < 100; i++ {
+		mid := (low + high) / 2
+		npvMid := xnpv(mid, flows)
+		if math.IsNaN(npvMid) {
+			return 0, false
+		}
+		if math.Abs(npvMid) < 1e-8 || math.Abs(high-low) < 1e-7 {
+			return mid, true
+		}
+		if npvLow*npvMid < 0 {
+			high = mid
+			npvHigh = npvMid
+		} else {
+			low = mid
+			npvLow = npvMid
+		}
+	}
+	return (low + high) / 2, true
+}
+
+func xnpv(rate float64, flows []cashFlow) float64 {
+	factor := 1 + rate
+	if factor <= 0 {
+		return math.NaN()
+	}
+	base := flows[0].when
+	var total float64
+	for _, flow := range flows {
+		years := flow.when.Sub(base).Hours() / (24 * 365.0)
+		discount := math.Pow(factor, years)
+		if discount == 0 {
+			return math.NaN()
+		}
+		total += flow.amount / discount
+	}
+	return total
+}
+
+func xnpvDerivative(rate float64, flows []cashFlow) float64 {
+	factor := 1 + rate
+	if factor <= 0 {
+		return math.NaN()
+	}
+	base := flows[0].when
+	var total float64
+	for _, flow := range flows {
+		years := flow.when.Sub(base).Hours() / (24 * 365.0)
+		discount := math.Pow(factor, years+1)
+		if discount == 0 {
+			return math.NaN()
+		}
+		total += -years * flow.amount / discount
+	}
+	return total
+}
+
+func logXIRRFlows(flows []cashFlow) {
+	if !debugXIRREnabled {
+		return
+	}
+	defaultServerLogger.Printf("xirr debug flows=%d (timestamp,amount)", len(flows))
+	for _, flow := range flows {
+		defaultServerLogger.Printf("xirr-flow,%s,%s", formatXIRRTimestamp(flow.when), formatXIRRAmount(flow.amount))
+	}
+}
+
+func logXIRRRate(rate float64) {
+	if !debugXIRREnabled {
+		return
+	}
+	defaultServerLogger.Printf("xirr result rate=%s (%.2f%%)", formatXIRRAmount(rate), rate*100)
+}
+
+func formatXIRRTimestamp(ts time.Time) string {
+	return ts.Format("02.01.2006 15:04:05")
+}
+
+func formatXIRRAmount(value float64) string {
+	amount := fmt.Sprintf("%.9f", value)
+	return strings.Replace(amount, ".", ",", 1)
+}
+
 func renderTemplate(w http.ResponseWriter, page string, data TemplateData) {
 	tmpl, ok := pageTemplates[page]
 	if !ok {
@@ -343,7 +694,7 @@ func demoWalletData() *WalletData {
 		liquidSOL  = 340.456647705
 		stakedSOL  = 340.454186848
 		rewards30d = 2.30228288
-		apy        = 8.26
+		apy        = defaultAnnualReturnPercent
 	)
 
 	rates := FiatRates{EUR: 160.0, USD: 180.0}
@@ -418,7 +769,7 @@ func demoWalletData() *WalletData {
 				Label:   "Annual Return",
 				Value:   fmt.Sprintf("%.2f%%", apy),
 				Subtext: "Projected APY",
-				Tooltip: "Calcuated as XIRR over the last 4 months based on staking rewards and deposits.",
+				Tooltip: walletAnnualReturnTooltip,
 			},
 		},
 		Rewards:   rewardEntries,
@@ -431,26 +782,19 @@ func formatNumber(value float64) string {
 	return string(s)
 }
 
-func (s *server) collectRecentRewards(ctx context.Context, stakeAccounts []StakeAccount) ([]RewardRow, error) {
-	if len(stakeAccounts) == 0 {
+func (s *server) collectRecentRewards(ctx context.Context, stakeAccounts []StakeAccount, boundaries []EpochBoundary) ([]RewardRow, error) {
+	if len(stakeAccounts) == 0 || len(boundaries) == 0 {
 		return nil, nil
 	}
 
-	lookbackStart := rewardWindowStart(time.Now().UTC())
-	boundaries, err := s.solanaClient.GetEpochBoundaries(ctx, lookbackStart)
-	if err != nil {
-		return nil, fmt.Errorf("epoch boundaries: %w", err)
-	}
-	if len(boundaries) == 0 {
-		return nil, nil
-	}
-	sort.Slice(boundaries, func(i, j int) bool {
-		return boundaries[i].Epoch > boundaries[j].Epoch
+	sortedBoundaries := append([]EpochBoundary(nil), boundaries...)
+	sort.Slice(sortedBoundaries, func(i, j int) bool {
+		return sortedBoundaries[i].Epoch > sortedBoundaries[j].Epoch
 	})
 
-	targetEpochs := make([]uint64, 0, len(boundaries))
-	epochDates := make(map[uint64]time.Time, len(boundaries))
-	for _, boundary := range boundaries {
+	targetEpochs := make([]uint64, 0, len(sortedBoundaries))
+	epochDates := make(map[uint64]time.Time, len(sortedBoundaries))
+	for _, boundary := range sortedBoundaries {
 		targetEpochs = append(targetEpochs, boundary.Epoch)
 		epochDates[boundary.Epoch] = boundary.EndTime
 	}
@@ -499,7 +843,7 @@ func (s *server) collectRecentRewards(ctx context.Context, stakeAccounts []Stake
 		}
 	}
 
-	if tips, err := collectJitoTips(ctx, s.ensureTipCollector(), stakeAccounts, epochDates, targetEpochs, boundaries); err != nil {
+	if tips, err := collectJitoTips(ctx, s.ensureTipCollector(), stakeAccounts, epochDates, targetEpochs, sortedBoundaries); err != nil {
 		return nil, fmt.Errorf("jito tips: %w", err)
 	} else if len(tips) > 0 {
 		rewardRows = append(rewardRows, tips...)

@@ -50,11 +50,6 @@
           <div class="small text-muted mt-2">
             Address: <span>{{ .Address }}</span>
           </div>
-          {{ if gt .DelegatedSOL 0.0 }}
-          <div class="small text-muted">
-            Delegated: <span>{{ printf "%.9f" .DelegatedSOL }} SOL</span>
-          </div>
-          {{ end }}
         </div>
         <div class="text-end" id="walletSummary"
              data-balance-sol="{{ printf "%.2f" .BalanceSOL }}"

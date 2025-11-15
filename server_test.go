@@ -73,7 +73,7 @@ func TestWalletAddressRouteRendersBalance(t *testing.T) {
 	const delegatedLamports = 1230000000
 	const rewardLamports = 170000000
 	const previousEpoch = 879
-	rewardEndTime := time.Date(2024, time.January, 15, 12, 0, 0, 0, time.UTC)
+	rewardEndTime := time.Now().UTC().Add(-72 * time.Hour)
 	stubClient := &stubSolanaClient{
 		balance: lamports,
 		epochBoundaries: []EpochBoundary{
@@ -92,6 +92,12 @@ func TestWalletAddressRouteRendersBalance(t *testing.T) {
 		stakeAccounts: []StakeAccount{
 			{Address: "Stake111", DelegatedLamports: delegatedLamports, VoteAccount: "Vote111"},
 		},
+		epochInfo: &EpochInfo{
+			Epoch:        previousEpoch + 1,
+			AbsoluteSlot: 1_000_000,
+			SlotIndex:    10,
+			SlotsInEpoch: 400,
+		},
 	}
 
 	handler := NewServer(
@@ -103,6 +109,7 @@ func TestWalletAddressRouteRendersBalance(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("unexpected status: got %d, want %d", rec.Code, http.StatusOK)
 	}
+	body := rec.Body.String()
 
 	if stubClient.calledWith != "4Nd1mYFHGQMiZ1ZkZZgwyUrKvYzUKGwEuUXXSb9Qe7CG" {
 		t.Fatalf("solana client called with %q", stubClient.calledWith)
@@ -121,30 +128,66 @@ func TestWalletAddressRouteRendersBalance(t *testing.T) {
 	}
 
 	expectedBalance := fmt.Sprintf(">%s SOL<", formatNumber(float64(lamports+delegatedLamports)/lamportsPerSOL))
-	if !strings.Contains(rec.Body.String(), expectedBalance) {
-		t.Fatalf("wallet view missing balance marker %q: body=%q", expectedBalance, rec.Body.String())
-	}
-
-	expectedDelegated := fmt.Sprintf("Delegated: <span>%.9f SOL</span>", float64(delegatedLamports)/lamportsPerSOL)
-	if !strings.Contains(rec.Body.String(), expectedDelegated) {
-		t.Fatalf("wallet view missing delegated amount: %q", rec.Body.String())
+	if !strings.Contains(body, expectedBalance) {
+		t.Fatalf("wallet view missing balance marker %q: body=%q", expectedBalance, body)
 	}
 
 	expectedDate := rewardEndTime.UTC().Format(rewardDateFormat) + " UTC"
-	if !strings.Contains(rec.Body.String(), expectedDate) {
-		t.Fatalf("wallet view missing reward date %q: body=%q", expectedDate, rec.Body.String())
+	if !strings.Contains(body, expectedDate) {
+		t.Fatalf("wallet view missing reward date %q: body=%q", expectedDate, body)
 	}
 
 	expectedAmount := formatNumber(float64(rewardLamports) / lamportsPerSOL)
-	if !strings.Contains(rec.Body.String(), expectedAmount) {
-		t.Fatalf("wallet view missing reward amount %q: body=%q", expectedAmount, rec.Body.String())
+	if !strings.Contains(body, expectedAmount) {
+		t.Fatalf("wallet view missing reward amount %q: body=%q", expectedAmount, body)
 	}
 
-	if !strings.Contains(rec.Body.String(), "Vote111") {
-		t.Fatalf("wallet view missing validator Vote111: %q", rec.Body.String())
+	if !strings.Contains(body, "Vote111") {
+		t.Fatalf("wallet view missing validator Vote111: %q", body)
 	}
-	if !strings.Contains(rec.Body.String(), "Rewards (SOL)") {
-		t.Fatalf("wallet view missing reward chart payload: %q", rec.Body.String())
+	if !strings.Contains(body, "Rewards (SOL)") {
+		t.Fatalf("wallet view missing reward chart payload: %q", body)
+	}
+
+	if !strings.Contains(body, "Staked Balance") {
+		t.Fatalf("wallet view missing staked balance metric label: %q", body)
+	}
+
+	expectedStakedMetric := fmt.Sprintf("%s SOL", formatNumber(float64(delegatedLamports)/lamportsPerSOL))
+	if !strings.Contains(body, expectedStakedMetric) {
+		t.Fatalf("wallet view missing staked balance metric value %q: body=%q", expectedStakedMetric, body)
+	}
+
+	if !strings.Contains(body, "30d Rewards") {
+		t.Fatalf("wallet view missing 30d rewards metric label: %q", body)
+	}
+
+	expectedThirtyDayRewards := fmt.Sprintf("%s SOL", formatNumber(float64(rewardLamports)/lamportsPerSOL))
+	if !strings.Contains(body, expectedThirtyDayRewards) {
+		t.Fatalf("wallet view missing 30d rewards metric value %q: body=%q", expectedThirtyDayRewards, body)
+	}
+
+	annualIdx := strings.Index(body, "Annual Return")
+	if annualIdx == -1 {
+		t.Fatalf("wallet view missing annual return metric label: %q", body)
+	}
+	valueMarker := `<div class="fs-5 fw-semibold mt-1">`
+	valueStart := strings.Index(body[annualIdx:], valueMarker)
+	if valueStart == -1 {
+		t.Fatalf("wallet view missing annual return value block: %q", body)
+	}
+	valueStart += annualIdx + len(valueMarker)
+	valueEnd := strings.Index(body[valueStart:], "</div>")
+	if valueEnd == -1 {
+		t.Fatalf("wallet view missing annual return closing tag: %q", body)
+	}
+	annualValue := strings.TrimSpace(body[valueStart : valueStart+valueEnd])
+	defaultAnnual := fmt.Sprintf("%.2f%%", defaultAnnualReturnPercent)
+	if annualValue == defaultAnnual {
+		t.Fatalf("annual return fell back to default %s: body=%q", defaultAnnual, body)
+	}
+	if !strings.HasSuffix(annualValue, "%") {
+		t.Fatalf("annual return missing percentage suffix: %q", annualValue)
 	}
 }
 
@@ -209,6 +252,43 @@ func TestRewardChartPayload(t *testing.T) {
 		if math.Abs(got-expectedData[i]) > 1e-9 {
 			t.Fatalf("unexpected data at %d: got %.9f want %.9f", i, got, expectedData[i])
 		}
+	}
+}
+
+func TestXIRRBasic(t *testing.T) {
+	base := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
+	flows := []cashFlow{
+		{when: base, amount: -1000},
+		{when: base.AddDate(1, 0, 0), amount: 1100},
+	}
+	rate, ok := xirr(flows)
+	if !ok {
+		t.Fatalf("xirr failed to converge")
+	}
+	if math.Abs(rate-0.1) > 1e-6 {
+		t.Fatalf("unexpected rate: %.9f", rate)
+	}
+}
+
+func TestComputeAnnualReturnPercent(t *testing.T) {
+	now := time.Date(2025, time.March, 1, 0, 0, 0, 0, time.UTC)
+	rewardTime := now.Add(-15 * 24 * time.Hour)
+	rewards := []RewardRow{
+		{Epoch: 42, Timestamp: rewardTime, AmountSOLValue: 2},
+		{Epoch: 43, Timestamp: rewardTime.Add(3 * 24 * time.Hour), AmountSOLValue: 2},
+	}
+	boundaries := []EpochBoundary{
+		{Epoch: 42, EndTime: rewardTime},
+		{Epoch: 41, EndTime: rewardTime.Add(-3 * 24 * time.Hour)},
+	}
+	info := &EpochInfo{Epoch: 50, AbsoluteSlot: 1_000_000, SlotIndex: 100, SlotsInEpoch: 400}
+
+	apy, ok := computeAnnualReturnPercent(now, 100, rewards, boundaries, info)
+	if !ok {
+		t.Fatalf("computeAnnualReturnPercent returned false")
+	}
+	if apy <= 0 {
+		t.Fatalf("expected positive APY, got %.2f", apy)
 	}
 }
 
