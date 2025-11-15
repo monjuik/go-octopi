@@ -52,7 +52,7 @@
           </div>
           {{ if gt .DelegatedSOL 0.0 }}
           <div class="small text-muted">
-            Delegated: <span>{{ .DelegatedSOL }}</span>
+            Delegated: <span>{{ printf "%.9f" .DelegatedSOL }} SOL</span>
           </div>
           {{ end }}
         </div>

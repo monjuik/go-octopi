@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
-	"log"
 	"net/http"
 	"os"
 	"regexp"
@@ -30,7 +29,7 @@ var (
 )
 
 const (
-	defaultFooter         = "© 2025 OctoPi · Made with ❤️ in Cyprus using Bootstrap & ApexCharts"
+	defaultFooter         = "© 2025 OctoPi · Made with ❤️ using Bootstrap, ApexCharts, Helius, and Go"
 	lamportsPerSOL        = 1_000_000_000
 	heliusAPIKeyEnv       = "HELIUS_API_KEY"
 	heliusMainnetTemplate = "https://mainnet.helius-rpc.com/?api-key=%s"
@@ -41,28 +40,29 @@ const (
 
 var (
 	defaultFiatRates     = FiatRates{EUR: 160.0, USD: 180.0}
-	defaultServerLogger  = log.New(os.Stdout, "[octopi] ", log.LstdFlags|log.Lmicroseconds)
+	defaultServerLogger  = NewLogger("octopi")
 	solanaAddressPattern = regexp.MustCompile(`^[1-9A-HJ-NP-Za-km-z]{32,44}$`)
 )
 
 type server struct {
 	solanaClient SolanaClient
-	logger       *log.Logger
+	logger       Logger
+	tipCollector *jitoTipCollector
 }
 
 type serverConfig struct {
 	solanaClient SolanaClient
-	logger       *log.Logger
+	logger       Logger
 }
 
 func newDefaultSolanaClient() SolanaClient {
 	key := os.Getenv(heliusAPIKeyEnv)
 	if key == "" {
-		log.Fatalf("environment variable %s is required for Helius RPC access", heliusAPIKeyEnv)
+		panic(fmt.Sprintf("environment variable %s is required for Helius RPC access", heliusAPIKeyEnv))
 	}
 
 	endpoint := fmt.Sprintf(heliusMainnetTemplate, key)
-	log.Printf("using Helius Solana RPC endpoint")
+	defaultServerLogger.Printf("using Helius Solana RPC endpoint")
 	return &RPCSolanaClient{
 		Endpoint:   endpoint,
 		HTTPClient: newRateLimitedHTTPClient(endpoint),
@@ -80,7 +80,7 @@ func WithSolanaClient(client SolanaClient) ServerOption {
 }
 
 // WithLogger overrides the server logger.
-func WithLogger(l *log.Logger) ServerOption {
+func WithLogger(l Logger) ServerOption {
 	return func(cfg *serverConfig) {
 		cfg.logger = l
 	}
@@ -170,6 +170,7 @@ func NewServer(opts ...ServerOption) http.Handler {
 		solanaClient: cfg.solanaClient,
 		logger:       cfg.logger,
 	}
+	srv.tipCollector = newJitoTipCollector(cfg.solanaClient, cfg.logger)
 
 	srv.warmupEpochs()
 
@@ -332,7 +333,7 @@ func renderTemplate(w http.ResponseWriter, page string, data TemplateData) {
 		return
 	}
 	if err := tmpl.ExecuteTemplate(w, "layout", data); err != nil {
-		log.Printf("template %s render error: %v", page, err)
+		defaultServerLogger.Printf("template %s render error: %v", page, err)
 		http.Error(w, "template rendering error", http.StatusInternalServerError)
 	}
 }
@@ -498,6 +499,12 @@ func (s *server) collectRecentRewards(ctx context.Context, stakeAccounts []Stake
 		}
 	}
 
+	if tips, err := collectJitoTips(ctx, s.ensureTipCollector(), stakeAccounts, epochDates, targetEpochs, boundaries); err != nil {
+		return nil, fmt.Errorf("jito tips: %w", err)
+	} else if len(tips) > 0 {
+		rewardRows = append(rewardRows, tips...)
+	}
+
 	sort.Slice(rewardRows, func(i, j int) bool {
 		ti := rewardRows[i].Timestamp
 		tj := rewardRows[j].Timestamp
@@ -596,4 +603,15 @@ func (s *server) warmupEpochs() {
 	if s.logger != nil {
 		s.logger.Printf("epoch warmup complete windowStart=%s epochs=%d", windowStart.Format(time.RFC3339), len(boundaries))
 	}
+}
+
+func (s *server) ensureTipCollector() *jitoTipCollector {
+	if s.tipCollector != nil {
+		return s.tipCollector
+	}
+	if s.solanaClient == nil {
+		return nil
+	}
+	s.tipCollector = newJitoTipCollector(s.solanaClient, s.logger)
+	return s.tipCollector
 }

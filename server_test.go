@@ -3,8 +3,6 @@ package gooctopi
 import (
 	"context"
 	"fmt"
-	"io"
-	"log"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -127,7 +125,8 @@ func TestWalletAddressRouteRendersBalance(t *testing.T) {
 		t.Fatalf("wallet view missing balance marker %q: body=%q", expectedBalance, rec.Body.String())
 	}
 
-	if !strings.Contains(rec.Body.String(), "Delegated: <span>1.23 SOL</span>") {
+	expectedDelegated := fmt.Sprintf("Delegated: <span>%.9f SOL</span>", float64(delegatedLamports)/lamportsPerSOL)
+	if !strings.Contains(rec.Body.String(), expectedDelegated) {
 		t.Fatalf("wallet view missing delegated amount: %q", rec.Body.String())
 	}
 
@@ -226,6 +225,9 @@ type stubSolanaClient struct {
 	transactions        map[string]*TransactionDetail
 	transactionErr      error
 	transactionsReq     []string
+	eventsErr           error
+	eventsByAuthority   map[string][]Event
+	eventRequests       []GetEventsRequest
 	epochInfo           *EpochInfo
 	epochErr            error
 	epochBoundaries     []EpochBoundary
@@ -253,16 +255,32 @@ func (s *stubSolanaClient) ListStakeAccounts(_ context.Context, owner string) ([
 	return append([]StakeAccount(nil), s.stakeAccounts...), nil
 }
 
-func (s *stubSolanaClient) GetSignaturesForAddress(_ context.Context, address string, limit int) ([]SignatureInfo, error) {
+func (s *stubSolanaClient) GetSignaturesForAddress(_ context.Context, address string, limit int, before string) ([]SignatureInfo, error) {
 	s.signaturesRequested = append(s.signaturesRequested, address)
 	if s.signaturesErr != nil {
 		return nil, s.signaturesErr
 	}
 	entries := s.signaturesByAddress[address]
+	if before != "" {
+		if idx := indexOfSignature(entries, before); idx >= 0 && idx+1 < len(entries) {
+			entries = entries[idx+1:]
+		} else if idx >= 0 {
+			entries = nil
+		}
+	}
 	if limit > 0 && len(entries) > limit {
 		entries = entries[:limit]
 	}
 	return append([]SignatureInfo(nil), entries...), nil
+}
+
+func indexOfSignature(entries []SignatureInfo, signature string) int {
+	for i, entry := range entries {
+		if entry.Signature == signature {
+			return i
+		}
+	}
+	return -1
 }
 
 func (s *stubSolanaClient) GetTransaction(_ context.Context, signature string) (*TransactionDetail, error) {
@@ -276,7 +294,23 @@ func (s *stubSolanaClient) GetTransaction(_ context.Context, signature string) (
 	}
 	copyTx := *tx
 	copyTx.Meta.Rewards = append([]TransactionReward(nil), tx.Meta.Rewards...)
+	copyTx.Meta.PreBalances = append([]uint64(nil), tx.Meta.PreBalances...)
+	copyTx.Meta.PostBalances = append([]uint64(nil), tx.Meta.PostBalances...)
+	copyTx.AccountKeys = append([]string(nil), tx.AccountKeys...)
+	copyTx.Instructions = append([]TransactionInstruction(nil), tx.Instructions...)
 	return &copyTx, nil
+}
+
+func (s *stubSolanaClient) GetTransactions(ctx context.Context, signatures []string) (map[string]*TransactionDetail, error) {
+	results := make(map[string]*TransactionDetail, len(signatures))
+	for _, sig := range signatures {
+		tx, err := s.GetTransaction(ctx, sig)
+		if err != nil {
+			return nil, err
+		}
+		results[sig] = tx
+	}
+	return results, nil
 }
 
 func (s *stubSolanaClient) GetInflationReward(_ context.Context, addresses []string, epoch *uint64) ([]*InflationReward, error) {
@@ -330,8 +364,38 @@ func (s *stubSolanaClient) GetEpochInfo(_ context.Context) (*EpochInfo, error) {
 	return &copyInfo, nil
 }
 
-func newTestLogger() *log.Logger {
-	return log.New(io.Discard, "", 0)
+func (s *stubSolanaClient) GetEvents(_ context.Context, req GetEventsRequest) (*EventsPage, error) {
+	if s.eventsErr != nil {
+		return nil, s.eventsErr
+	}
+	s.eventRequests = append(s.eventRequests, req)
+	var authority string
+	if req.Query != nil {
+		if accounts, ok := req.Query["accounts"]; ok {
+			switch v := accounts.(type) {
+			case []string:
+				if len(v) > 0 {
+					authority = v[0]
+				}
+			case []any:
+				if len(v) > 0 {
+					if val, ok := v[0].(string); ok {
+						authority = val
+					}
+				}
+			}
+		}
+	}
+	events := s.eventsByAuthority[authority]
+	page := &EventsPage{
+		Events: make([]Event, len(events)),
+	}
+	copy(page.Events, events)
+	return page, nil
+}
+
+func newTestLogger() Logger {
+	return NewDiscardLogger()
 }
 
 func performRequest(t *testing.T, handler http.Handler, method, target string) *httptest.ResponseRecorder {

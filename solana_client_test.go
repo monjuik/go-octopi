@@ -205,6 +205,94 @@ func TestRPCSolanaClientListStakeAccounts(t *testing.T) {
 	}
 }
 
+func TestRPCSolanaClientGetTransactionParsesMeta(t *testing.T) {
+	t.Parallel()
+
+	client := &RPCSolanaClient{
+		Endpoint: "http://solana.test",
+		HTTPClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				payload := `{
+					"jsonrpc":"2.0",
+					"id":1,
+					"result":{
+						"slot":123,
+						"blockTime":1700000000,
+						"meta":{
+							"rewards":[
+								{
+									"pubkey":"Reward111",
+									"lamports":100,
+									"postBalance":200,
+									"rewardType":"rent",
+									"commission":null,
+									"voteAccount":"VoteReward"
+								}
+							],
+							"preBalances":[1000,500],
+							"postBalances":[1500,500],
+							"err":null,
+							"innerInstructions":[
+								{
+									"index":0,
+									"instructions":[
+										{
+											"programId":"Compute11111111111111111111111111111111",
+											"accounts":["Withdraw111","Other111"],
+											"data":"00",
+											"program":"system",
+											"stackHeight":1
+										}
+									]
+								}
+							]
+						},
+						"transaction":{
+							"message":{
+								"accountKeys":["Withdraw111","Other111"]
+							}
+						}
+					}
+				}`
+
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(payload)),
+					Header:     make(http.Header),
+				}, nil
+			}),
+		},
+	}
+
+	detail, err := client.GetTransaction(context.Background(), "sig1")
+	if err != nil {
+		t.Fatalf("GetTransaction returned error: %v", err)
+	}
+
+	if len(detail.AccountKeys) != 2 || detail.AccountKeys[0] != "Withdraw111" {
+		t.Fatalf("unexpected account keys: %#v", detail.AccountKeys)
+	}
+	if len(detail.Meta.PreBalances) != 2 || detail.Meta.PreBalances[0] != 1000 {
+		t.Fatalf("preBalances not parsed: %#v", detail.Meta.PreBalances)
+	}
+	if len(detail.Meta.PostBalances) != 2 || detail.Meta.PostBalances[0] != 1500 {
+		t.Fatalf("postBalances not parsed: %#v", detail.Meta.PostBalances)
+	}
+	if len(detail.Meta.InnerInstructions) != 1 {
+		t.Fatalf("missing inner instructions: %#v", detail.Meta.InnerInstructions)
+	}
+	inst := detail.Meta.InnerInstructions[0].Instructions
+	if len(inst) != 1 || inst[0].ProgramID != "Compute11111111111111111111111111111111" {
+		t.Fatalf("inner instruction not parsed: %#v", inst)
+	}
+	if inst[0].StackHeight == nil || *inst[0].StackHeight != 1 {
+		t.Fatalf("stack height missing in instruction: %#v", inst[0])
+	}
+	if len(detail.Meta.Err) != 0 {
+		t.Fatalf("expected empty error, got %q", string(detail.Meta.Err))
+	}
+}
+
 func TestRPCSolanaClientGetSignaturesForAddress(t *testing.T) {
 	t.Parallel()
 
@@ -220,6 +308,9 @@ func TestRPCSolanaClientGetSignaturesForAddress(t *testing.T) {
 				params, _ := payload.Params[1].(map[string]interface{})
 				if params["limit"].(float64) != 10 {
 					t.Fatalf("expected limit 10, got %v", params["limit"])
+				}
+				if params["before"].(string) != "sig-before" {
+					t.Fatalf("expected before signature, got %v", params["before"])
 				}
 
 				resp := `{
@@ -240,7 +331,7 @@ func TestRPCSolanaClientGetSignaturesForAddress(t *testing.T) {
 		},
 	}
 
-	sigs, err := client.GetSignaturesForAddress(context.Background(), "StakePub111", 10)
+	sigs, err := client.GetSignaturesForAddress(context.Background(), "StakePub111", 10, "sig-before")
 	if err != nil {
 		t.Fatalf("GetSignaturesForAddress returned error: %v", err)
 	}
