@@ -18,7 +18,7 @@ There is a need for a **simple, transparent, and fair** service with a free tier
 - Manual wallet entry (one address at a time). Think later about handling a portfolio – a set of wallets.
 - Support for Ethereum and Solana: balances, staking rewards, LSD tokens.
 - XIRR is calculated as if today all the amount was received back.
-- Mind ony last full 3 months.
+- Mind the current week plus the last full 4 weeks.
 - Asset values displayed in either **EUR or USD** (user-selectable).
 - Free tier up to €10k (or equivalent in USD).
 - Paid subscription π (3.14159) USDT/USDC/month once portfolio value exceeds threshold.
@@ -87,7 +87,7 @@ Purpose: show staking income analytics for the given wallet.
   - Switch of the currency EUR/USD
   - Wallet summary (network, balance, balance in fiat currency, last update).
   - Annual return (XIRR).
-  - Monthly rewards chart (stacked columns).
+  - Weekly rewards chart (stacked columns).
   - Recent rewards table.
 - Mock is provided in `mocks/wallet_dashboard_mock.html`
 
@@ -115,8 +115,8 @@ We are using Helius (`https://mainnet.helius-rpc.com/?api-key=...`) and respecti
 
 #### Data Depth and Update Policy
 
-- Data history limited to **current month + three full preceding months**.
-  Example: if today is 9 Nov 2025 → data range = 1 Aug 2025 – 9 Nov 2025.
+- Data history limited to **the current week plus the four full preceding weeks**.
+  Example: if today is 9 Nov 2025 → data range = 6 Oct 2025 – 9 Nov 2025.
 - Older epochs and transactions are ignored to reduce RPC load and response latency.
 - This range typically corresponds to ~30 Solana epochs (~70–80 RPC calls max per wallet).
 

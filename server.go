@@ -34,12 +34,12 @@ const (
 	lamportsPerSOL               = 1_000_000_000
 	heliusAPIKeyEnv              = "HELIUS_API_KEY"
 	heliusMainnetTemplate        = "https://mainnet.helius-rpc.com/?api-key=%s"
-	rewardLookbackMonths         = 3
+	rewardLookbackWeeks          = 4
 	rewardDateFormat             = "2006-01-02 15:04"
-	rewardChartMonths            = rewardLookbackMonths + 1
-	walletRewardMetricWindowDays = 30
+	rewardChartWeeks             = rewardLookbackWeeks + 1
+	walletRewardMetricWindowDays = 28
 	defaultAnnualReturnPercent   = 8.26
-	walletAnnualReturnTooltip    = "Calcuated as XIRR over the last 4 months based on staking rewards and deposits."
+	walletAnnualReturnTooltip    = "Calcuated as XIRR over the current week plus the previous 4 weeks based on staking rewards and deposits."
 	debugXIRREnv                 = "OCTOPI_DEBUG_XIRR"
 )
 
@@ -293,7 +293,7 @@ func (s *server) handleWallet(w http.ResponseWriter, r *http.Request) {
 		s.logger.Printf("epoch boundaries fetch warning address=%s error=%v", address, boundaryErr)
 	}
 
-	recentRewards, rewardsErr := s.collectRecentRewards(ctx, stakeAccounts, boundaries)
+	recentRewards, rewardsErr := s.collectRecentRewards(ctx, now, stakeAccounts, boundaries)
 	if rewardsErr != nil {
 		s.logger.Printf("stake rewards fetch warning address=%s error=%v", address, rewardsErr)
 	}
@@ -364,9 +364,9 @@ func buildWalletMetrics(now time.Time, delegatedSOL float64, rewards []RewardRow
 			Subtext: "Currently delegated",
 		},
 		{
-			Label:   "30d Rewards",
+			Label:   "28d Rewards",
 			Value:   fmt.Sprintf("%s SOL", formatNumber(rewardSum)),
-			Subtext: "Last 30 days",
+			Subtext: "Last 28 days",
 		},
 		{
 			Label:   "Annual Return",
@@ -693,7 +693,7 @@ func demoWalletData() *WalletData {
 	const (
 		liquidSOL  = 340.456647705
 		stakedSOL  = 340.454186848
-		rewards30d = 2.30228288
+		rewards28d = 2.30228288
 		apy        = defaultAnnualReturnPercent
 	)
 
@@ -704,9 +704,9 @@ func demoWalletData() *WalletData {
 	balanceFiat := fmt.Sprintf("≈ €%s", formatNumber(totalSOL*rates.EUR))
 
 	chartPayload := walletChart{
-		Labels: []string{"Aug", "Sep", "Oct", "Nov"},
+		Labels: []string{"Oct 13", "Oct 20", "Oct 27", "Nov 03", "Nov 10"},
 		Series: []chartSeries{
-			{Name: "Rewards (SOL)", Data: []float64{2.05, 2.18, 2.19, 2.40}},
+			{Name: "Rewards (SOL)", Data: []float64{0.45, 0.52, 0.50, 0.63, 0.18}},
 		},
 	}
 	chartJSON, err := json.Marshal(chartPayload)
@@ -764,7 +764,7 @@ func demoWalletData() *WalletData {
 		FiatRates:     rates,
 		Metrics: []WalletMetric{
 			{Label: "Staked Balance", Value: fmt.Sprintf("%s SOL", formatNumber(stakedSOL)), Subtext: "Across 12 validators"},
-			{Label: "30d Rewards", Value: fmt.Sprintf("%s SOL", formatNumber(rewards30d))},
+			{Label: "28d Rewards", Value: fmt.Sprintf("%s SOL", formatNumber(rewards28d))},
 			{
 				Label:   "Annual Return",
 				Value:   fmt.Sprintf("%.2f%%", apy),
@@ -782,12 +782,25 @@ func formatNumber(value float64) string {
 	return string(s)
 }
 
-func (s *server) collectRecentRewards(ctx context.Context, stakeAccounts []StakeAccount, boundaries []EpochBoundary) ([]RewardRow, error) {
+func (s *server) collectRecentRewards(ctx context.Context, now time.Time, stakeAccounts []StakeAccount, boundaries []EpochBoundary) ([]RewardRow, error) {
 	if len(stakeAccounts) == 0 || len(boundaries) == 0 {
 		return nil, nil
 	}
 
-	sortedBoundaries := append([]EpochBoundary(nil), boundaries...)
+	windowStart := rewardWindowStart(now)
+	windowEnd := weekFloor(now).AddDate(0, 0, 7)
+
+	relevantBoundaries := make([]EpochBoundary, 0, len(boundaries))
+	for _, boundary := range boundaries {
+		if boundary.EndTime.IsZero() || !boundary.EndTime.Before(windowStart) {
+			relevantBoundaries = append(relevantBoundaries, boundary)
+		}
+	}
+	if len(relevantBoundaries) == 0 {
+		return nil, nil
+	}
+
+	sortedBoundaries := append([]EpochBoundary(nil), relevantBoundaries...)
 	sort.Slice(sortedBoundaries, func(i, j int) bool {
 		return sortedBoundaries[i].Epoch > sortedBoundaries[j].Epoch
 	})
@@ -849,21 +862,36 @@ func (s *server) collectRecentRewards(ctx context.Context, stakeAccounts []Stake
 		rewardRows = append(rewardRows, tips...)
 	}
 
-	sort.Slice(rewardRows, func(i, j int) bool {
-		ti := rewardRows[i].Timestamp
-		tj := rewardRows[j].Timestamp
+	filtered := rewardRows[:0]
+	for _, reward := range rewardRows {
+		ts := reward.Timestamp
+		if ts.IsZero() {
+			continue
+		}
+		if ts.Before(windowStart) || !ts.Before(windowEnd) {
+			continue
+		}
+		filtered = append(filtered, reward)
+	}
+	if len(filtered) == 0 {
+		return nil, nil
+	}
+
+	sort.Slice(filtered, func(i, j int) bool {
+		ti := filtered[i].Timestamp
+		tj := filtered[j].Timestamp
 		if !ti.IsZero() && !tj.IsZero() && !ti.Equal(tj) {
 			return ti.After(tj)
 		}
-		return rewardRows[i].Epoch > rewardRows[j].Epoch
+		return filtered[i].Epoch > filtered[j].Epoch
 	})
 
-	return rewardRows, nil
+	return filtered, nil
 }
 
 func rewardWindowStart(now time.Time) time.Time {
-	currentMonthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
-	return currentMonthStart.AddDate(0, -rewardLookbackMonths, 0)
+	currentWeekStart := weekFloor(now)
+	return currentWeekStart.AddDate(0, 0, -7*rewardLookbackWeeks)
 }
 
 func formatRewardDate(ts time.Time, epoch uint64) string {
@@ -884,21 +912,21 @@ func buildRewardChartJSON(now time.Time, rewards []RewardRow) (template.JS, erro
 
 func rewardChartPayload(now time.Time, rewards []RewardRow) walletChart {
 	start := rewardWindowStart(now)
-	labels := make([]string, rewardChartMonths)
-	data := make([]float64, rewardChartMonths)
+	labels := make([]string, rewardChartWeeks)
+	data := make([]float64, rewardChartWeeks)
 
-	for i := 0; i < rewardChartMonths; i++ {
-		month := start.AddDate(0, i, 0)
-		labels[i] = month.Format("Jan")
+	for i := 0; i < rewardChartWeeks; i++ {
+		week := start.AddDate(0, 0, i*7)
+		labels[i] = week.Format("Jan 02")
 	}
 
 	for _, reward := range rewards {
 		if reward.Timestamp.IsZero() {
 			continue
 		}
-		month := monthFloor(reward.Timestamp)
-		index := monthsBetween(start, month)
-		if index < 0 || index >= rewardChartMonths {
+		week := weekFloor(reward.Timestamp)
+		index := weeksBetween(start, week)
+		if index < 0 || index >= rewardChartWeeks {
 			continue
 		}
 		data[index] += reward.AmountSOLValue
@@ -915,12 +943,17 @@ func rewardChartPayload(now time.Time, rewards []RewardRow) walletChart {
 	}
 }
 
-func monthFloor(t time.Time) time.Time {
-	return time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, time.UTC)
+func weekFloor(t time.Time) time.Time {
+	t = t.UTC()
+	weekday := int(t.Weekday())
+	// Align to Monday as the start of the week.
+	daysSinceMonday := (weekday + 6) % 7
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -daysSinceMonday)
 }
 
-func monthsBetween(start, target time.Time) int {
-	return (target.Year()-start.Year())*12 + int(target.Month()) - int(start.Month())
+func weeksBetween(start, target time.Time) int {
+	const week = 7 * 24 * time.Hour
+	return int(target.Sub(start) / week)
 }
 
 func (s *server) warmupEpochs() {

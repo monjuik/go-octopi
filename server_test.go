@@ -158,13 +158,13 @@ func TestWalletAddressRouteRendersBalance(t *testing.T) {
 		t.Fatalf("wallet view missing staked balance metric value %q: body=%q", expectedStakedMetric, body)
 	}
 
-	if !strings.Contains(body, "30d Rewards") {
-		t.Fatalf("wallet view missing 30d rewards metric label: %q", body)
+	if !strings.Contains(body, "28d Rewards") {
+		t.Fatalf("wallet view missing 28d rewards metric label: %q", body)
 	}
 
-	expectedThirtyDayRewards := fmt.Sprintf("%s SOL", formatNumber(float64(rewardLamports)/lamportsPerSOL))
-	if !strings.Contains(body, expectedThirtyDayRewards) {
-		t.Fatalf("wallet view missing 30d rewards metric value %q: body=%q", expectedThirtyDayRewards, body)
+	expectedTwentyEightDayRewards := fmt.Sprintf("%s SOL", formatNumber(float64(rewardLamports)/lamportsPerSOL))
+	if !strings.Contains(body, expectedTwentyEightDayRewards) {
+		t.Fatalf("wallet view missing 28d rewards metric value %q: body=%q", expectedTwentyEightDayRewards, body)
 	}
 
 	annualIdx := strings.Index(body, "Annual Return")
@@ -221,17 +221,17 @@ func TestWalletAddressRouteValidatesInput(t *testing.T) {
 }
 
 func TestRewardChartPayload(t *testing.T) {
-	now := time.Date(2025, time.November, 15, 0, 0, 0, 0, time.UTC)
+	now := time.Date(2025, time.November, 10, 0, 0, 0, 0, time.UTC) // Monday
 	rewards := []RewardRow{
-		{Timestamp: time.Date(2025, time.November, 2, 9, 0, 0, 0, time.UTC), AmountSOLValue: 0.3},
-		{Timestamp: time.Date(2025, time.September, 18, 12, 0, 0, 0, time.UTC), AmountSOLValue: 0.1},
-		{Timestamp: time.Date(2025, time.August, 5, 7, 0, 0, 0, time.UTC), AmountSOLValue: 0.2},
-		{Timestamp: time.Date(2025, time.July, 30, 23, 0, 0, 0, time.UTC), AmountSOLValue: 0.4},
+		{Timestamp: time.Date(2025, time.November, 6, 9, 0, 0, 0, time.UTC), AmountSOLValue: 0.5},
+		{Timestamp: time.Date(2025, time.October, 29, 12, 0, 0, 0, time.UTC), AmountSOLValue: 0.3},
+		{Timestamp: time.Date(2025, time.October, 20, 7, 0, 0, 0, time.UTC), AmountSOLValue: 0.1},
+		{Timestamp: time.Date(2025, time.October, 14, 23, 0, 0, 0, time.UTC), AmountSOLValue: 0.2},
 	}
 
 	payload := rewardChartPayload(now, rewards)
 
-	expectedLabels := []string{"Aug", "Sep", "Oct", "Nov"}
+	expectedLabels := []string{"Oct 13", "Oct 20", "Oct 27", "Nov 03", "Nov 10"}
 	if len(payload.Labels) != len(expectedLabels) {
 		t.Fatalf("unexpected number of labels: %#v", payload.Labels)
 	}
@@ -244,7 +244,7 @@ func TestRewardChartPayload(t *testing.T) {
 	if len(payload.Series) != 1 {
 		t.Fatalf("expected single series, got %d", len(payload.Series))
 	}
-	expectedData := []float64{0.2, 0.1, 0.0, 0.3}
+	expectedData := []float64{0.2, 0.1, 0.3, 0.5, 0.0}
 	if len(payload.Series[0].Data) != len(expectedData) {
 		t.Fatalf("unexpected data points: %#v", payload.Series[0].Data)
 	}
