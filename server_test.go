@@ -98,6 +98,7 @@ func TestWalletAddressRouteRendersBalance(t *testing.T) {
 			SlotIndex:    10,
 			SlotsInEpoch: 400,
 		},
+		solPriceUSD: 155.5,
 	}
 
 	handler := NewServer(
@@ -166,6 +167,15 @@ func TestWalletAddressRouteRendersBalance(t *testing.T) {
 	if !strings.Contains(body, expectedTwentyEightDayRewards) {
 		t.Fatalf("wallet view missing 28d rewards metric value %q: body=%q", expectedTwentyEightDayRewards, body)
 	}
+	metricIdx := strings.Index(body, "28d Rewards")
+	if metricIdx == -1 {
+		t.Fatalf("wallet view missing 28d rewards marker")
+	}
+	metricSliceEnd := metricIdx + 200
+	if metricSliceEnd > len(body) {
+		metricSliceEnd = len(body)
+	}
+	metricSnippet := body[metricIdx:metricSliceEnd]
 
 	annualIdx := strings.Index(body, "Annual Return")
 	if annualIdx == -1 {
@@ -188,6 +198,54 @@ func TestWalletAddressRouteRendersBalance(t *testing.T) {
 	}
 	if !strings.HasSuffix(annualValue, "%") {
 		t.Fatalf("annual return missing percentage suffix: %q", annualValue)
+	}
+
+	expectedFiat := formatFiatUSD(float64(lamports+delegatedLamports) / lamportsPerSOL * stubClient.solPriceUSD)
+	if !strings.Contains(body, expectedFiat) {
+		t.Fatalf("wallet view missing fiat balance %q: body=%q", expectedFiat, body)
+	}
+
+	expectedRewardUSD := formatFiatUSD(float64(rewardLamports) / lamportsPerSOL * stubClient.solPriceUSD)
+	if !strings.Contains(body, expectedRewardUSD) {
+		t.Fatalf("reward table missing fiat value %q: body=%q", expectedRewardUSD, body)
+	}
+	if !strings.Contains(metricSnippet, expectedRewardUSD) {
+		t.Fatalf("28d rewards metric missing fiat subtext %q: snippet=%q", expectedRewardUSD, metricSnippet)
+	}
+}
+
+func TestWalletHidesFiatValueWhenPriceUnavailable(t *testing.T) {
+	ensureHeliusEnv(t)
+
+	stubClient := &stubSolanaClient{
+		balance: 2 * lamportsPerSOL,
+		epochBoundaries: []EpochBoundary{
+			{Epoch: 1, EndTime: time.Now().UTC()},
+		},
+		epochInfo: &EpochInfo{
+			Epoch:        2,
+			AbsoluteSlot: 10,
+			SlotIndex:    5,
+			SlotsInEpoch: 100,
+		},
+		solPriceErr: fmt.Errorf("price unavailable"),
+	}
+
+	handler := NewServer(
+		WithSolanaClient(stubClient),
+		WithLogger(newTestLogger()),
+	)
+
+	rec := performRequest(t, handler, http.MethodGet, "/wallet/4Nd1mYFHGQMiZ1ZkZZgwyUrKvYzUKGwEuUXXSb9Qe7CG")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: got %d, want %d", rec.Code, http.StatusOK)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "≈ $") {
+		t.Fatalf("fiat estimate should be hidden when price missing: body=%q", body)
+	}
+	if !strings.Contains(body, "Last 28 days") {
+		t.Fatalf("expected fallback metric subtext when price missing: body=%q", body)
 	}
 }
 
@@ -321,6 +379,9 @@ type stubSolanaClient struct {
 	voteErr             error
 	validatorNames      map[string]string
 	validatorLookupErr  error
+	solPriceUSD         float64
+	solPriceErr         error
+	solPriceCalls       int
 }
 
 func (s *stubSolanaClient) GetBalance(_ context.Context, address string) (uint64, error) {
@@ -506,6 +567,18 @@ func (s *stubSolanaClient) LookupValidatorName(_ context.Context, votePubkey str
 		return "", nil
 	}
 	return s.validatorNames[votePubkey], nil
+}
+
+func (s *stubSolanaClient) GetSOLPrice(_ context.Context) (float64, error) {
+	s.solPriceCalls++
+	if s.solPriceErr != nil {
+		return 0, s.solPriceErr
+	}
+	price := s.solPriceUSD
+	if price == 0 {
+		price = 180.0
+	}
+	return price, nil
 }
 
 func newTestLogger() Logger {

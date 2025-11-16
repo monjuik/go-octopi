@@ -29,13 +29,6 @@
       <span>Portfolio Dashboard</span>
     </a>
 
-    <div class="btn-group" role="group" aria-label="Fiat currency toggle">
-      <input type="radio" class="btn-check" name="fiatMode" id="modeEUR" value="EUR" autocomplete="off" checked>
-      <label class="btn btn-outline-primary" for="modeEUR"><i class="bi bi-currency-euro me-1"></i>EUR</label>
-
-      <input type="radio" class="btn-check" name="fiatMode" id="modeUSD" value="USD" autocomplete="off">
-      <label class="btn btn-outline-primary" for="modeUSD"><i class="bi bi-currency-dollar me-1"></i>USD</label>
-    </div>
   </div>
 
   <div class="card mb-4 shadow-soft">
@@ -51,12 +44,11 @@
             Address: <span>{{ .Address }}</span>
           </div>
         </div>
-        <div class="text-end" id="walletSummary"
-             data-balance-sol="{{ printf "%.2f" .BalanceSOL }}"
-             data-rate-eur="{{ printf "%.2f" .FiatRates.EUR }}"
-             data-rate-usd="{{ printf "%.2f" .FiatRates.USD }}">
+        <div class="text-end">
           <div class="fs-4 fw-semibold">{{ .BalanceCrypto }}</div>
-          <div class="text-muted" id="walletFiatValue">{{ .BalanceFiat }}</div>
+          {{ if .BalanceFiat }}
+          <div class="text-muted">{{ .BalanceFiat }}</div>
+          {{ end }}
         </div>
       </div>
     </div>
@@ -116,7 +108,12 @@
               <tr>
                 <td>{{ .Date }}</td>
                 <td>{{ .Type }}</td>
-                <td class="text-end">{{ .AmountSOL }}</td>
+                <td class="text-end">
+                  <div>{{ .AmountSOL }}</div>
+                  {{ if .AmountUSD }}
+                  <div class="text-muted small">{{ .AmountUSD }}</div>
+                  {{ end }}
+                </td>
                 <td>{{ .Validator }}</td>
                 <td>{{ .Epoch }}</td>
               </tr>
@@ -139,33 +136,6 @@
 
 <script>
   window.addEventListener("load", () => {
-    const summaryEl = document.getElementById("walletSummary");
-    if (!summaryEl) {
-      return;
-    }
-
-    const fiatDisplay = document.getElementById("walletFiatValue");
-    const formatFiat = (currency) => {
-      const balanceSol = parseFloat(summaryEl.dataset.balanceSol);
-      const rate = currency === "USD" ? parseFloat(summaryEl.dataset.rateUsd) : parseFloat(summaryEl.dataset.rateEur);
-      const symbol = currency === "USD" ? "$" : "€";
-      const value = balanceSol * rate;
-      fiatDisplay.textContent = `≈ ${symbol}${value.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
-    };
-
-    document.querySelectorAll('input[name="fiatMode"]').forEach((input) => {
-      input.addEventListener("change", () => {
-        if (input.checked) {
-          formatFiat(input.value);
-        }
-      });
-    });
-
-    const defaultMode = document.querySelector('input[name="fiatMode"]:checked');
-    if (defaultMode) {
-      formatFiat(defaultMode.value);
-    }
-
     if (window.bootstrap?.Tooltip) {
       document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach((el) => {
         new window.bootstrap.Tooltip(el);

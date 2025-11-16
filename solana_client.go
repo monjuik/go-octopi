@@ -26,6 +26,9 @@ const (
 	maxTransactionBatchLen = 10
 	validatorsAPITemplate  = "https://www.validators.app/api/v1/validators/mainnet/%s.json"
 	validatorCacheTTL      = 24 * time.Hour
+	solPriceAPITemplate    = "https://www.validators.app/api/v1/sol-prices.json?from=%s&to=%s"
+	solPriceCacheTTL       = time.Hour
+	solPriceTimeFormat     = "2006-01-02T15:04:05"
 )
 
 var (
@@ -52,6 +55,7 @@ type SolanaClient interface {
 	GetEvents(ctx context.Context, req GetEventsRequest) (*EventsPage, error)
 	GetVoteAccounts(ctx context.Context, votePubkey string) ([]VoteAccount, error)
 	LookupValidatorName(ctx context.Context, votePubkey string) (string, error)
+	GetSOLPrice(ctx context.Context) (float64, error)
 }
 
 // RPCSolanaClient calls the public Solana JSON-RPC endpoint.
@@ -63,6 +67,8 @@ type RPCSolanaClient struct {
 	validators      *validatorRepository
 	validatorAPIKey string
 	validatorRepoMu sync.Mutex
+	priceRepo       *solPriceRepository
+	priceRepoMu     sync.Mutex
 }
 
 func (c *RPCSolanaClient) logger() Logger {
@@ -1394,6 +1400,150 @@ type tipDistributionPayload struct {
 	Amount    json.Number `json:"amount"`
 }
 
+type solPriceRepository struct {
+	apiKey string
+	client *http.Client
+	ttl    time.Duration
+	logger Logger
+	now    func() time.Time
+
+	mu    sync.Mutex
+	cache solPriceCacheEntry
+}
+
+type solPriceCacheEntry struct {
+	value    float64
+	storedAt time.Time
+	valid    bool
+}
+
+func newSOLPriceRepository(apiKey string, logger Logger) *solPriceRepository {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return nil
+	}
+	return &solPriceRepository{
+		apiKey: apiKey,
+		client: &http.Client{
+			Timeout: defaultHTTPTimeout,
+		},
+		ttl:    solPriceCacheTTL,
+		logger: logger,
+		now:    time.Now,
+	}
+}
+
+func (r *solPriceRepository) PriceUSD(ctx context.Context) (float64, error) {
+	if r == nil {
+		return 0, fmt.Errorf("sol price repository not configured")
+	}
+	if price, ok := r.cached(); ok {
+		return price, nil
+	}
+
+	price, err := r.fetch(ctx)
+	if err != nil {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.cache.valid {
+			return r.cache.value, nil
+		}
+		return 0, err
+	}
+
+	r.store(price)
+	return price, nil
+}
+
+func (r *solPriceRepository) cached() (float64, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if !r.cache.valid {
+		return 0, false
+	}
+	if r.now().Sub(r.cache.storedAt) > r.ttl {
+		return 0, false
+	}
+	return r.cache.value, true
+}
+
+func (r *solPriceRepository) store(price float64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.cache = solPriceCacheEntry{
+		value:    price,
+		storedAt: r.now(),
+		valid:    true,
+	}
+}
+
+func (r *solPriceRepository) fetch(ctx context.Context) (float64, error) {
+	from, to := r.window()
+	endpoint := fmt.Sprintf(solPriceAPITemplate, from, to)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return 0, fmt.Errorf("build sol price request: %w", err)
+	}
+	req.Header.Set("Token", r.apiKey)
+
+	if r.logger != nil {
+		r.logger.Printf("sol price request window=%s->%s", from, to)
+	}
+
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("sol price request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		if r.logger != nil {
+			r.logger.Printf("sol price error status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+		return 0, fmt.Errorf("sol price status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return 0, fmt.Errorf("read sol price response: %w", err)
+	}
+
+	if r.logger != nil {
+		r.logger.Printf("sol price response window=%s->%s payload=%s", from, to, strings.TrimSpace(string(data)))
+	}
+
+	var payload []struct {
+		AveragePrice string `json:"average_price"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return 0, fmt.Errorf("decode sol price response: %w", err)
+	}
+	if len(payload) == 0 {
+		return 0, fmt.Errorf("sol price response empty")
+	}
+
+	entry := payload[len(payload)-1]
+	if strings.TrimSpace(entry.AveragePrice) == "" {
+		return 0, fmt.Errorf("sol price missing average_price")
+	}
+	price, err := strconv.ParseFloat(entry.AveragePrice, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse sol price %q: %w", entry.AveragePrice, err)
+	}
+	return price, nil
+}
+
+func (r *solPriceRepository) window() (string, string) {
+	now := r.now().UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	yesterday := today.Add(-24 * time.Hour)
+	return yesterday.Format(solPriceTimeFormat), today.Format(solPriceTimeFormat)
+}
+
 type validatorRepository struct {
 	apiKey string
 	client *http.Client
@@ -1614,6 +1764,14 @@ func (c *RPCSolanaClient) LookupValidatorName(ctx context.Context, votePubkey st
 	return repo.LookupName(ctx, votePubkey)
 }
 
+func (c *RPCSolanaClient) GetSOLPrice(ctx context.Context) (float64, error) {
+	repo := c.ensurePriceRepository()
+	if repo == nil {
+		return 0, fmt.Errorf("sol price repository not configured")
+	}
+	return repo.PriceUSD(ctx)
+}
+
 func (c *RPCSolanaClient) ensureValidatorRepository() *validatorRepository {
 	c.validatorRepoMu.Lock()
 	defer c.validatorRepoMu.Unlock()
@@ -1631,6 +1789,25 @@ func (c *RPCSolanaClient) ensureValidatorRepository() *validatorRepository {
 	}
 	c.validators = newValidatorRepository(key, c, c.logger())
 	return c.validators
+}
+
+func (c *RPCSolanaClient) ensurePriceRepository() *solPriceRepository {
+	c.priceRepoMu.Lock()
+	defer c.priceRepoMu.Unlock()
+
+	if c.priceRepo != nil {
+		return c.priceRepo
+	}
+
+	key := c.validatorAPIKey
+	if key == "" {
+		key = os.Getenv(ValidatorsAPIKeyEnv)
+	}
+	if key == "" {
+		return nil
+	}
+	c.priceRepo = newSOLPriceRepository(key, c.logger())
+	return c.priceRepo
 }
 
 func newRateLimitedHTTPClient(endpoint string) *http.Client {

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -760,6 +761,103 @@ func TestEpochCachePersistLockedWritesFile(t *testing.T) {
 	}
 	if !snapshot.CoveredFrom.Equal(boundary.EndTime) {
 		t.Fatalf("unexpected coveredFrom %s want %s", snapshot.CoveredFrom, boundary.EndTime)
+	}
+}
+
+func TestRPCSolanaClientGetSOLPriceFetchesFromValidators(t *testing.T) {
+	t.Parallel()
+
+	repo := newSOLPriceRepository("token-123", newTestLogger())
+	repo.now = func() time.Time {
+		return time.Date(2025, time.November, 16, 9, 30, 0, 0, time.UTC)
+	}
+
+	var requestedURL string
+	var token string
+	repo.client = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			requestedURL = req.URL.String()
+			token = req.Header.Get("Token")
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`[{"average_price":"139.00"}]`)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+
+	client := &RPCSolanaClient{
+		priceRepo: repo,
+	}
+
+	price, err := client.GetSOLPrice(context.Background())
+	if err != nil {
+		t.Fatalf("GetSOLPrice returned error: %v", err)
+	}
+	if math.Abs(price-139.0) > 1e-9 {
+		t.Fatalf("unexpected price %.2f", price)
+	}
+
+	if token != "token-123" {
+		t.Fatalf("expected validators token header, got %q", token)
+	}
+	if !strings.Contains(requestedURL, "from=2025-11-15T00:00:00") || !strings.Contains(requestedURL, "to=2025-11-16T00:00:00") {
+		t.Fatalf("unexpected url %q", requestedURL)
+	}
+}
+
+func TestRPCSolanaClientGetSOLPriceUsesCache(t *testing.T) {
+	t.Parallel()
+
+	repo := newSOLPriceRepository("token-123", newTestLogger())
+	repo.now = func() time.Time {
+		return time.Date(2025, time.November, 16, 0, 0, 0, 0, time.UTC)
+	}
+
+	var calls int
+	repo.client = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			calls++
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`[{"average_price":"140.50"}]`)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+
+	client := &RPCSolanaClient{
+		priceRepo: repo,
+	}
+
+	if _, err := client.GetSOLPrice(context.Background()); err != nil {
+		t.Fatalf("first GetSOLPrice call returned error: %v", err)
+	}
+	if _, err := client.GetSOLPrice(context.Background()); err != nil {
+		t.Fatalf("second GetSOLPrice call returned error: %v", err)
+	}
+
+	if calls != 1 {
+		t.Fatalf("expected single HTTP call, got %d", calls)
+	}
+}
+
+func TestRPCSolanaClientGetSOLPriceErrorsWithoutCache(t *testing.T) {
+	t.Parallel()
+
+	repo := newSOLPriceRepository("token-123", newTestLogger())
+	repo.client = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return nil, fmt.Errorf("boom")
+		}),
+	}
+
+	client := &RPCSolanaClient{
+		priceRepo: repo,
+	}
+
+	if _, err := client.GetSOLPrice(context.Background()); err == nil {
+		t.Fatal("expected error, got nil")
 	}
 }
 

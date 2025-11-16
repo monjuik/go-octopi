@@ -43,7 +43,6 @@ const (
 )
 
 var (
-	defaultFiatRates     = FiatRates{EUR: 160.0, USD: 180.0}
 	defaultServerLogger  = NewLogger("octopi")
 	solanaAddressPattern = regexp.MustCompile(`^[1-9A-HJ-NP-Za-km-z]{32,44}$`)
 	debugXIRREnabled     = os.Getenv(debugXIRREnv) == "1"
@@ -113,19 +112,11 @@ type WalletData struct {
 	Address       string
 	BalanceCrypto string
 	BalanceFiat   string
-	RateNote      string
 	BalanceSOL    float64
 	DelegatedSOL  float64
-	FiatRates     FiatRates
 	Metrics       []WalletMetric
 	Rewards       []RewardRow
 	ChartJSON     template.JS
-}
-
-// FiatRates holds conversion values for SOL.
-type FiatRates struct {
-	EUR float64
-	USD float64
 }
 
 // WalletMetric describes a summary card for the wallet page.
@@ -142,6 +133,7 @@ type RewardRow struct {
 	Type           string
 	AmountSOL      string
 	AmountSOLValue float64
+	AmountUSD      string
 	Validator      string
 	Epoch          int
 	Timestamp      time.Time
@@ -302,7 +294,12 @@ func (s *server) handleWallet(w http.ResponseWriter, r *http.Request) {
 		s.logger.Printf("stake rewards fetch warning address=%s error=%v", address, rewardsErr)
 	}
 
-	walletView := s.buildWalletData(address, balanceLamports, delegatedLamports)
+	priceUSD, priceErr := s.solanaClient.GetSOLPrice(ctx)
+	if priceErr != nil {
+		s.logger.Printf("sol price fetch warning address=%s error=%v", address, priceErr)
+	}
+
+	walletView := s.buildWalletData(address, balanceLamports, delegatedLamports, priceUSD, priceErr == nil)
 	var epochInfo *EpochInfo
 	if info, err := s.solanaClient.GetEpochInfo(ctx); err != nil {
 		s.logger.Printf("epoch info fetch warning address=%s error=%v", address, err)
@@ -310,7 +307,10 @@ func (s *server) handleWallet(w http.ResponseWriter, r *http.Request) {
 		epochInfo = info
 	}
 
-	walletView.Metrics = buildWalletMetrics(now, walletView.DelegatedSOL, recentRewards, boundaries, epochInfo)
+	walletView.Metrics = buildWalletMetrics(now, walletView.DelegatedSOL, recentRewards, boundaries, epochInfo, priceUSD, priceErr == nil)
+	if priceErr == nil && priceUSD > 0 && len(recentRewards) > 0 {
+		applyRewardFiatValues(recentRewards, priceUSD)
+	}
 	if len(recentRewards) > 0 {
 		walletView.Rewards = recentRewards
 	}
@@ -331,11 +331,15 @@ func (s *server) handleWallet(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *server) buildWalletData(address string, lamports uint64, delegatedLamports uint64) *WalletData {
+func (s *server) buildWalletData(address string, lamports uint64, delegatedLamports uint64, priceUSD float64, hasPrice bool) *WalletData {
 	updated := time.Now().UTC().Format("02 Jan 2006 15:04 UTC")
 	liquidSOL := float64(lamports) / lamportsPerSOL
 	delegatedSOL := float64(delegatedLamports) / lamportsPerSOL
 	totalSOL := liquidSOL + delegatedSOL
+	balanceFiat := ""
+	if hasPrice {
+		balanceFiat = formatFiatUSD(totalSOL * priceUSD)
+	}
 
 	return &WalletData{
 		Network:       "Solana Mainnet",
@@ -343,14 +347,12 @@ func (s *server) buildWalletData(address string, lamports uint64, delegatedLampo
 		Address:       address,
 		BalanceSOL:    totalSOL,
 		DelegatedSOL:  delegatedSOL,
-		FiatRates:     defaultFiatRates,
 		BalanceCrypto: fmt.Sprintf("%s SOL", formatNumber(totalSOL)),
-		BalanceFiat:   fmt.Sprintf("≈ €%s", formatNumber(totalSOL*defaultFiatRates.EUR)),
-		RateNote:      "Rates are indicative demo data.",
+		BalanceFiat:   balanceFiat,
 	}
 }
 
-func buildWalletMetrics(now time.Time, delegatedSOL float64, rewards []RewardRow, boundaries []EpochBoundary, epochInfo *EpochInfo) []WalletMetric {
+func buildWalletMetrics(now time.Time, delegatedSOL float64, rewards []RewardRow, boundaries []EpochBoundary, epochInfo *EpochInfo, priceUSD float64, hasPrice bool) []WalletMetric {
 	rewardCutoff := now.AddDate(0, 0, -walletRewardMetricWindowDays)
 	rewardSum := sumRewardsSince(rewards, rewardCutoff)
 	annualReturn := defaultAnnualReturnPercent
@@ -370,7 +372,7 @@ func buildWalletMetrics(now time.Time, delegatedSOL float64, rewards []RewardRow
 		{
 			Label:   "28d Rewards",
 			Value:   fmt.Sprintf("%s SOL", formatNumber(rewardSum)),
-			Subtext: "Last 28 days",
+			Subtext: rewardMetricSubtext(rewardSum, priceUSD, hasPrice),
 		},
 		{
 			Label:   "Annual Return",
@@ -699,13 +701,12 @@ func demoWalletData() *WalletData {
 		stakedSOL  = 340.454186848
 		rewards28d = 2.30228288
 		apy        = defaultAnnualReturnPercent
+		demoPrice  = 180.0
 	)
-
-	rates := FiatRates{EUR: 160.0, USD: 180.0}
 
 	totalSOL := liquidSOL + stakedSOL
 	balanceCrypto := fmt.Sprintf("%s SOL", formatNumber(totalSOL))
-	balanceFiat := fmt.Sprintf("≈ €%s", formatNumber(totalSOL*rates.EUR))
+	balanceFiat := formatFiatUSD(totalSOL * demoPrice)
 
 	chartPayload := walletChart{
 		Labels: []string{"Oct 13", "Oct 20", "Oct 27", "Nov 03", "Nov 10"},
@@ -724,6 +725,7 @@ func demoWalletData() *WalletData {
 			Type:           "Reward",
 			AmountSOL:      "0.17",
 			AmountSOLValue: 0.17,
+			AmountUSD:      formatFiatUSD(0.17 * demoPrice),
 			Validator:      "Atlas Nodes",
 			Epoch:          562,
 			Timestamp:      time.Date(2025, time.November, 7, 13, 40, 0, 0, time.UTC),
@@ -733,6 +735,7 @@ func demoWalletData() *WalletData {
 			Type:           "Reward",
 			AmountSOL:      "0.16",
 			AmountSOLValue: 0.16,
+			AmountUSD:      formatFiatUSD(0.16 * demoPrice),
 			Validator:      "North Star",
 			Epoch:          561,
 			Timestamp:      time.Date(2025, time.November, 5, 8, 15, 0, 0, time.UTC),
@@ -742,6 +745,7 @@ func demoWalletData() *WalletData {
 			Type:           "Reward",
 			AmountSOL:      "0.16",
 			AmountSOLValue: 0.16,
+			AmountUSD:      formatFiatUSD(0.16 * demoPrice),
 			Validator:      "Atlas Nodes",
 			Epoch:          560,
 			Timestamp:      time.Date(2025, time.November, 1, 11, 5, 0, 0, time.UTC),
@@ -751,6 +755,7 @@ func demoWalletData() *WalletData {
 			Type:           "Reward",
 			AmountSOL:      "0.15",
 			AmountSOLValue: 0.15,
+			AmountUSD:      formatFiatUSD(0.15 * demoPrice),
 			Validator:      "SolGuard",
 			Epoch:          559,
 			Timestamp:      time.Date(2025, time.October, 30, 6, 50, 0, 0, time.UTC),
@@ -765,10 +770,9 @@ func demoWalletData() *WalletData {
 		BalanceFiat:   balanceFiat,
 		BalanceSOL:    totalSOL,
 		DelegatedSOL:  stakedSOL,
-		FiatRates:     rates,
 		Metrics: []WalletMetric{
 			{Label: "Staked Balance", Value: fmt.Sprintf("%s SOL", formatNumber(stakedSOL)), Subtext: "Across 12 validators"},
-			{Label: "28d Rewards", Value: fmt.Sprintf("%s SOL", formatNumber(rewards28d))},
+			{Label: "28d Rewards", Value: fmt.Sprintf("%s SOL", formatNumber(rewards28d)), Subtext: formatFiatUSD(rewards28d * demoPrice)},
 			{
 				Label:   "Annual Return",
 				Value:   fmt.Sprintf("%.2f%%", apy),
@@ -784,6 +788,10 @@ func demoWalletData() *WalletData {
 func formatNumber(value float64) string {
 	s := fmt.Sprintf("%.9f", value)
 	return string(s)
+}
+
+func formatFiatUSD(amount float64) string {
+	return fmt.Sprintf("≈ $%.2f", amount)
 }
 
 func (s *server) collectRecentRewards(ctx context.Context, now time.Time, stakeAccounts []StakeAccount, boundaries []EpochBoundary) ([]RewardRow, error) {
@@ -893,6 +901,26 @@ func (s *server) collectRecentRewards(ctx context.Context, now time.Time, stakeA
 	s.decorateRewardValidators(ctx, filtered)
 
 	return filtered, nil
+}
+
+func applyRewardFiatValues(rewards []RewardRow, priceUSD float64) {
+	if priceUSD <= 0 {
+		return
+	}
+	for i := range rewards {
+		value := rewards[i].AmountSOLValue
+		if value == 0 {
+			continue
+		}
+		rewards[i].AmountUSD = formatFiatUSD(value * priceUSD)
+	}
+}
+
+func rewardMetricSubtext(rewardSum float64, priceUSD float64, hasPrice bool) string {
+	if hasPrice && priceUSD > 0 {
+		return formatFiatUSD(rewardSum * priceUSD)
+	}
+	return "Last 28 days"
 }
 
 func (s *server) decorateRewardValidators(ctx context.Context, rewards []RewardRow) {
