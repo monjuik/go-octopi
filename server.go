@@ -30,9 +30,8 @@ var (
 )
 
 const (
-	defaultFooter                = "© 2025 OctoPi · Made with ❤️ using Bootstrap, ApexCharts, Helius, and Go"
+	defaultFooter                = "© 2025 OctoPi · Made with ❤️ using Bootstrap, ApexCharts, Helius, Validators.app, and Go"
 	lamportsPerSOL               = 1_000_000_000
-	heliusAPIKeyEnv              = "HELIUS_API_KEY"
 	heliusMainnetTemplate        = "https://mainnet.helius-rpc.com/?api-key=%s"
 	rewardLookbackWeeks          = 4
 	rewardDateFormat             = "2006-01-02 15:04"
@@ -62,16 +61,22 @@ type serverConfig struct {
 }
 
 func newDefaultSolanaClient() SolanaClient {
-	key := os.Getenv(heliusAPIKeyEnv)
+	key := os.Getenv(HeliusAPIKeyEnv)
 	if key == "" {
-		panic(fmt.Sprintf("environment variable %s is required for Helius RPC access", heliusAPIKeyEnv))
+		panic(fmt.Sprintf("environment variable %s is required for Helius RPC access", HeliusAPIKeyEnv))
 	}
+	if os.Getenv(ValidatorsAPIKeyEnv) == "" {
+		panic(fmt.Sprintf("environment variable %s is required for validators.app access", ValidatorsAPIKeyEnv))
+	}
+	validatorKey := os.Getenv(ValidatorsAPIKeyEnv)
 
 	endpoint := fmt.Sprintf(heliusMainnetTemplate, key)
 	defaultServerLogger.Printf("using Helius Solana RPC endpoint")
 	return &RPCSolanaClient{
-		Endpoint:   endpoint,
-		HTTPClient: newRateLimitedHTTPClient(endpoint),
+		Endpoint:        endpoint,
+		HTTPClient:      newRateLimitedHTTPClient(endpoint),
+		Logger:          defaultServerLogger,
+		validatorAPIKey: validatorKey,
 	}
 }
 
@@ -171,7 +176,6 @@ func NewServer(opts ...ServerOption) http.Handler {
 	if cfg.logger == nil {
 		cfg.logger = defaultServerLogger
 	}
-
 	srv := &server{
 		solanaClient: cfg.solanaClient,
 		logger:       cfg.logger,
@@ -886,7 +890,37 @@ func (s *server) collectRecentRewards(ctx context.Context, now time.Time, stakeA
 		return filtered[i].Epoch > filtered[j].Epoch
 	})
 
+	s.decorateRewardValidators(ctx, filtered)
+
 	return filtered, nil
+}
+
+func (s *server) decorateRewardValidators(ctx context.Context, rewards []RewardRow) {
+	if s == nil || s.solanaClient == nil || len(rewards) == 0 {
+		return
+	}
+
+	cache := make(map[string]string)
+	for i := range rewards {
+		id := strings.TrimSpace(rewards[i].Validator)
+		if id == "" {
+			continue
+		}
+
+		name, cached := cache[id]
+		if !cached {
+			resolved, err := s.solanaClient.LookupValidatorName(ctx, id)
+			if err != nil && s.logger != nil {
+				s.logger.Printf("validator lookup warning id=%s error=%v", id, err)
+			}
+			name = resolved
+			cache[id] = resolved
+		}
+
+		if name != "" {
+			rewards[i].Validator = name
+		}
+	}
 }
 
 func rewardWindowStart(now time.Time) time.Time {

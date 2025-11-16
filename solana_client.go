@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -23,6 +24,8 @@ const (
 	stakeProgramID         = "Stake11111111111111111111111111111111111111"
 	approxSlotDuration     = 400 * time.Millisecond
 	maxTransactionBatchLen = 10
+	validatorsAPITemplate  = "https://www.validators.app/api/v1/validators/mainnet/%s.json"
+	validatorCacheTTL      = 24 * time.Hour
 )
 
 var (
@@ -47,13 +50,26 @@ type SolanaClient interface {
 	GetEpochInfo(ctx context.Context) (*EpochInfo, error)
 	GetEpochBoundaries(ctx context.Context, minEndTime time.Time) ([]EpochBoundary, error)
 	GetEvents(ctx context.Context, req GetEventsRequest) (*EventsPage, error)
+	GetVoteAccounts(ctx context.Context, votePubkey string) ([]VoteAccount, error)
+	LookupValidatorName(ctx context.Context, votePubkey string) (string, error)
 }
 
 // RPCSolanaClient calls the public Solana JSON-RPC endpoint.
 type RPCSolanaClient struct {
-	Endpoint   string
-	HTTPClient *http.Client
-	epochCache *epochCache
+	Endpoint        string
+	HTTPClient      *http.Client
+	Logger          Logger
+	epochCache      *epochCache
+	validators      *validatorRepository
+	validatorAPIKey string
+	validatorRepoMu sync.Mutex
+}
+
+func (c *RPCSolanaClient) logger() Logger {
+	if c != nil && c.Logger != nil {
+		return c.Logger
+	}
+	return solanaRPCLogger
 }
 
 // StakeAccount carries parsed information about a delegated stake account.
@@ -157,6 +173,12 @@ type InflationReward struct {
 	Amount        int64
 	PostBalance   uint64
 	Commission    *int
+}
+
+// VoteAccount carries minimal metadata about a vote account.
+type VoteAccount struct {
+	VotePubkey string
+	NodePubkey string
 }
 
 // EpochInfo carries the current epoch metadata.
@@ -314,7 +336,7 @@ func (c *RPCSolanaClient) GetSignaturesForAddress(ctx context.Context, address s
 		limit = 1
 	}
 
-	solanaRPCLogger.Printf("getSignaturesForAddress address=%s limit=%d before=%s", address, limit, before)
+	c.logger().Printf("getSignaturesForAddress address=%s limit=%d before=%s", address, limit, before)
 
 	payload := rpcRequest{
 		JSONRPC: "2.0",
@@ -747,7 +769,7 @@ func (c *RPCSolanaClient) GetTransactions(ctx context.Context, signatures []stri
 }
 
 func (c *RPCSolanaClient) fetchTransactionBatch(ctx context.Context, signatures []string) (map[string]*TransactionDetail, error) {
-	solanaRPCLogger.Printf("getTransactions batch size=%d signatures=%s", len(signatures), strings.Join(signatures, ","))
+	c.logger().Printf("getTransactions batch size=%d signatures=%s", len(signatures), strings.Join(signatures, ","))
 	type lookup struct {
 		id        int
 		signature string
@@ -907,6 +929,71 @@ func (c *RPCSolanaClient) GetInflationReward(ctx context.Context, addresses []st
 	}
 
 	return results, nil
+}
+
+// GetVoteAccounts resolves metadata for vote accounts, including node identities.
+func (c *RPCSolanaClient) GetVoteAccounts(ctx context.Context, votePubkey string) ([]VoteAccount, error) {
+	c.logger().Printf("getVoteAccounts vote=%s", votePubkey)
+
+	config := map[string]any{
+		"commitment": "confirmed",
+	}
+	if votePubkey != "" {
+		config["votePubkey"] = votePubkey
+	}
+
+	payload := rpcRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "getVoteAccounts",
+		Params:  []any{config},
+	}
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(payload); err != nil {
+		return nil, fmt.Errorf("encode vote accounts request: %w", err)
+	}
+
+	resp, err := c.doRPCRequest(ctx, buf.Bytes())
+	if err != nil {
+		return nil, fmt.Errorf("rpc request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return nil, fmt.Errorf("rpc status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var rpcResp rpcGetVoteAccountsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		return nil, fmt.Errorf("decode vote accounts response: %w", err)
+	}
+	if rpcResp.Error != nil {
+		return nil, fmt.Errorf("rpc error (%d): %s", rpcResp.Error.Code, rpcResp.Error.Message)
+	}
+	if rpcResp.Result == nil {
+		return nil, fmt.Errorf("vote accounts response missing result")
+	}
+
+	appendEntries := func(dst []VoteAccount, entries []rpcVoteAccount) []VoteAccount {
+		for _, entry := range entries {
+			dst = append(dst, VoteAccount{
+				VotePubkey: entry.VotePubkey,
+				NodePubkey: entry.NodePubkey,
+			})
+		}
+		return dst
+	}
+
+	var accounts []VoteAccount
+	if len(rpcResp.Result.Current) > 0 {
+		accounts = appendEntries(accounts, rpcResp.Result.Current)
+	}
+	if len(rpcResp.Result.Delinquent) > 0 {
+		accounts = appendEntries(accounts, rpcResp.Result.Delinquent)
+	}
+	return accounts, nil
 }
 
 // GetEpochInfo retrieves the current epoch metadata.
@@ -1233,6 +1320,23 @@ type rpcInflationReward struct {
 	Commission    *int   `json:"commission"`
 }
 
+type rpcGetVoteAccountsResponse struct {
+	JSONRPC string               `json:"jsonrpc"`
+	ID      int                  `json:"id"`
+	Result  *rpcVoteAccountsBody `json:"result"`
+	Error   *rpcError            `json:"error"`
+}
+
+type rpcVoteAccountsBody struct {
+	Current    []rpcVoteAccount `json:"current"`
+	Delinquent []rpcVoteAccount `json:"delinquent"`
+}
+
+type rpcVoteAccount struct {
+	VotePubkey string `json:"votePubkey"`
+	NodePubkey string `json:"nodePubkey"`
+}
+
 type rpcGetBlockTimeResponse struct {
 	JSONRPC string    `json:"jsonrpc"`
 	ID      int       `json:"id"`
@@ -1290,6 +1394,245 @@ type tipDistributionPayload struct {
 	Amount    json.Number `json:"amount"`
 }
 
+type validatorRepository struct {
+	apiKey string
+	client *http.Client
+	ttl    time.Duration
+	logger Logger
+	solana SolanaClient
+
+	mu        sync.Mutex
+	cache     map[string]validatorCacheEntry
+	nodeCache map[string]nodeCacheEntry
+}
+
+type validatorCacheEntry struct {
+	name      string
+	expiresAt time.Time
+}
+
+type nodeCacheEntry struct {
+	value     string
+	expiresAt time.Time
+}
+
+func newValidatorRepository(apiKey string, solana SolanaClient, logger Logger) *validatorRepository {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return nil
+	}
+	return &validatorRepository{
+		apiKey:    apiKey,
+		client:    &http.Client{Timeout: defaultHTTPTimeout},
+		ttl:       validatorCacheTTL,
+		logger:    logger,
+		solana:    solana,
+		cache:     make(map[string]validatorCacheEntry),
+		nodeCache: make(map[string]nodeCacheEntry),
+	}
+}
+
+func (r *validatorRepository) LookupName(ctx context.Context, accountID string) (string, error) {
+	if r == nil {
+		return "", fmt.Errorf("validator repository not configured")
+	}
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return "", fmt.Errorf("account id is required")
+	}
+
+	if name, ok := r.cached(accountID); ok {
+		return name, nil
+	}
+
+	identity := accountID
+	if resolved, err := r.lookupNodePubkey(ctx, accountID); err == nil && resolved != "" {
+		identity = resolved
+	} else if err != nil && r.logger != nil {
+		r.logger.Printf("validator lookup node warning vote=%s error=%v", accountID, err)
+	}
+
+	if identity != accountID {
+		if name, ok := r.cached(identity); ok {
+			r.store(accountID, name)
+			return name, nil
+		}
+	}
+
+	name, err := r.fetchName(ctx, identity)
+	if err != nil {
+		return "", err
+	}
+
+	r.store(accountID, name)
+	if identity != accountID {
+		r.store(identity, name)
+	}
+	return name, nil
+}
+
+func (r *validatorRepository) cached(accountID string) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	entry, ok := r.cache[accountID]
+	if !ok {
+		return "", false
+	}
+	if time.Now().After(entry.expiresAt) {
+		delete(r.cache, accountID)
+		return "", false
+	}
+	return entry.name, true
+}
+
+func (r *validatorRepository) store(accountID, name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.cache == nil {
+		r.cache = make(map[string]validatorCacheEntry)
+	}
+	r.cache[accountID] = validatorCacheEntry{
+		name:      name,
+		expiresAt: time.Now().Add(r.ttl),
+	}
+}
+
+func (r *validatorRepository) lookupNodePubkey(ctx context.Context, votePubkey string) (string, error) {
+	if r.solana == nil || votePubkey == "" {
+		return "", nil
+	}
+	if node, ok := r.nodeCached(votePubkey); ok {
+		return node, nil
+	}
+
+	accounts, err := r.solana.GetVoteAccounts(ctx, votePubkey)
+	if err != nil {
+		return "", err
+	}
+	var node string
+	for _, acct := range accounts {
+		if strings.EqualFold(acct.VotePubkey, votePubkey) && acct.NodePubkey != "" {
+			node = acct.NodePubkey
+			break
+		}
+		if node == "" && acct.NodePubkey != "" {
+			node = acct.NodePubkey
+		}
+	}
+
+	r.storeNode(votePubkey, node)
+	return node, nil
+}
+
+func (r *validatorRepository) nodeCached(votePubkey string) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	entry, ok := r.nodeCache[votePubkey]
+	if !ok {
+		return "", false
+	}
+	if time.Now().After(entry.expiresAt) {
+		delete(r.nodeCache, votePubkey)
+		return "", false
+	}
+	return entry.value, true
+}
+
+func (r *validatorRepository) storeNode(votePubkey, node string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.nodeCache == nil {
+		r.nodeCache = make(map[string]nodeCacheEntry)
+	}
+	r.nodeCache[votePubkey] = nodeCacheEntry{
+		value:     node,
+		expiresAt: time.Now().Add(r.ttl),
+	}
+}
+
+func (r *validatorRepository) fetchName(ctx context.Context, accountID string) (string, error) {
+	endpoint := fmt.Sprintf(validatorsAPITemplate, url.PathEscape(accountID))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", fmt.Errorf("build validators request: %w", err)
+	}
+	req.Header.Set("Token", r.apiKey)
+
+	if r.logger != nil {
+		r.logger.Printf("validator lookup request account=%s", accountID)
+	}
+
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("validators request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		if r.logger != nil {
+			r.logger.Printf("validator lookup miss account=%s status=%d", accountID, resp.StatusCode)
+		}
+		return "", nil
+	}
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		if r.logger != nil {
+			r.logger.Printf("validator lookup error account=%s status=%d body=%s", accountID, resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+		return "", fmt.Errorf("validators status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return "", fmt.Errorf("read validators response: %w", err)
+	}
+
+	trimmed := strings.TrimSpace(string(data))
+	if r.logger != nil {
+		r.logger.Printf("validator lookup response account=%s payload=%s", accountID, trimmed)
+	}
+
+	var payload struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return "", fmt.Errorf("decode validators response: %w", err)
+	}
+	return payload.Name, nil
+}
+
+func (c *RPCSolanaClient) LookupValidatorName(ctx context.Context, votePubkey string) (string, error) {
+	repo := c.ensureValidatorRepository()
+	if repo == nil {
+		return "", fmt.Errorf("validator repository not configured")
+	}
+	return repo.LookupName(ctx, votePubkey)
+}
+
+func (c *RPCSolanaClient) ensureValidatorRepository() *validatorRepository {
+	c.validatorRepoMu.Lock()
+	defer c.validatorRepoMu.Unlock()
+
+	if c.validators != nil {
+		return c.validators
+	}
+
+	key := c.validatorAPIKey
+	if key == "" {
+		key = os.Getenv(ValidatorsAPIKeyEnv)
+	}
+	if key == "" {
+		return nil
+	}
+	c.validators = newValidatorRepository(key, c, c.logger())
+	return c.validators
+}
+
 func newRateLimitedHTTPClient(endpoint string) *http.Client {
 	limiter := limiterForEndpoint(endpoint)
 	transport := http.RoundTripper(http.DefaultTransport)
@@ -1319,7 +1662,7 @@ func (c *RPCSolanaClient) doRPCRequest(ctx context.Context, payload []byte) (*ht
 		}
 
 		if resp.StatusCode == http.StatusTooManyRequests {
-			solanaRPCLogger.Printf("429 response headers: %v", resp.Header)
+			c.logger().Printf("429 response headers: %v", resp.Header)
 			if delay, ok := retryAfterDelay(resp.Header.Get("Retry-After")); ok {
 				resp.Body.Close()
 				timer := time.NewTimer(delay)

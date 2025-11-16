@@ -317,6 +317,10 @@ type stubSolanaClient struct {
 	inflationErr        error
 	inflationRequests   [][]string
 	inflationEpochs     []uint64
+	voteAccounts        map[string]VoteAccount
+	voteErr             error
+	validatorNames      map[string]string
+	validatorLookupErr  error
 }
 
 func (s *stubSolanaClient) GetBalance(_ context.Context, address string) (uint64, error) {
@@ -474,6 +478,36 @@ func (s *stubSolanaClient) GetEvents(_ context.Context, req GetEventsRequest) (*
 	return page, nil
 }
 
+func (s *stubSolanaClient) GetVoteAccounts(_ context.Context, votePubkey string) ([]VoteAccount, error) {
+	if s.voteErr != nil {
+		return nil, s.voteErr
+	}
+	if len(s.voteAccounts) == 0 {
+		return nil, nil
+	}
+	if votePubkey != "" {
+		if acct, ok := s.voteAccounts[votePubkey]; ok {
+			return []VoteAccount{acct}, nil
+		}
+		return nil, nil
+	}
+	results := make([]VoteAccount, 0, len(s.voteAccounts))
+	for _, acct := range s.voteAccounts {
+		results = append(results, acct)
+	}
+	return results, nil
+}
+
+func (s *stubSolanaClient) LookupValidatorName(_ context.Context, votePubkey string) (string, error) {
+	if s.validatorLookupErr != nil {
+		return "", s.validatorLookupErr
+	}
+	if s.validatorNames == nil {
+		return "", nil
+	}
+	return s.validatorNames[votePubkey], nil
+}
+
 func newTestLogger() Logger {
 	return NewDiscardLogger()
 }
@@ -489,5 +523,6 @@ func performRequest(t *testing.T, handler http.Handler, method, target string) *
 
 func ensureHeliusEnv(t *testing.T) {
 	t.Helper()
-	t.Setenv(heliusAPIKeyEnv, "test-key")
+	t.Setenv(HeliusAPIKeyEnv, "test-key")
+	t.Setenv(ValidatorsAPIKeyEnv, "validators-test-key")
 }
