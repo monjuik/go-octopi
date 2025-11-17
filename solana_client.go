@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -32,12 +33,18 @@ const (
 )
 
 var (
-	solanaRPCLogger = NewLogger("solana-rpc")
-	epochLog        = NewLogger("epoch-cache")
-	epochCachePath  string
+	solanaRPCLogger   = NewLogger("solana-rpc")
+	epochLog          = NewLogger("epoch-cache")
+	epochCachePath    string
+	rpcRequestCounter uint64
 )
 
 const epochCacheFilename = "sol-epochs.gob"
+
+func newRPCRequestID() string {
+	counter := atomic.AddUint64(&rpcRequestCounter, 1)
+	return fmt.Sprintf("%d-%d", time.Now().UnixNano(), counter)
+}
 
 // ErrEventsUnsupported indicates that the RPC endpoint does not implement getEvents.
 var ErrEventsUnsupported = errors.New("solana getEvents not supported on this endpoint")
@@ -206,7 +213,7 @@ type EpochBoundary struct {
 func (c *RPCSolanaClient) GetBalance(ctx context.Context, address string) (uint64, error) {
 	payload := rpcRequest{
 		JSONRPC: "2.0",
-		ID:      1,
+		ID:      newRPCRequestID(),
 		Method:  "getBalance",
 		Params: []any{
 			address,
@@ -265,7 +272,7 @@ func (c *RPCSolanaClient) endpoint() string {
 func (c *RPCSolanaClient) ListStakeAccounts(ctx context.Context, owner string) ([]StakeAccount, error) {
 	payload := rpcRequest{
 		JSONRPC: "2.0",
-		ID:      1,
+		ID:      newRPCRequestID(),
 		Method:  "getProgramAccounts",
 		Params: []any{
 			stakeProgramID,
@@ -346,7 +353,7 @@ func (c *RPCSolanaClient) GetSignaturesForAddress(ctx context.Context, address s
 
 	payload := rpcRequest{
 		JSONRPC: "2.0",
-		ID:      1,
+		ID:      newRPCRequestID(),
 		Method:  "getSignaturesForAddress",
 		Params: []any{
 			address,
@@ -402,7 +409,7 @@ func (c *RPCSolanaClient) GetSignaturesForAddress(ctx context.Context, address s
 func (c *RPCSolanaClient) GetTransaction(ctx context.Context, signature string) (*TransactionDetail, error) {
 	payload := rpcRequest{
 		JSONRPC: "2.0",
-		ID:      1,
+		ID:      newRPCRequestID(),
 		Method:  "getTransaction",
 		Params: []any{
 			signature,
@@ -603,7 +610,7 @@ func (c *RPCSolanaClient) GetEvents(ctx context.Context, req GetEventsRequest) (
 
 	payload := rpcRequest{
 		JSONRPC: "2.0",
-		ID:      1,
+		ID:      newRPCRequestID(),
 		Method:  "getEvents",
 		Params:  []any{config},
 	}
@@ -777,14 +784,13 @@ func (c *RPCSolanaClient) GetTransactions(ctx context.Context, signatures []stri
 func (c *RPCSolanaClient) fetchTransactionBatch(ctx context.Context, signatures []string) (map[string]*TransactionDetail, error) {
 	c.logger().Printf("getTransactions batch size=%d signatures=%s", len(signatures), strings.Join(signatures, ","))
 	type lookup struct {
-		id        int
+		id        string
 		signature string
 	}
 
 	seen := make(map[string]struct{}, len(signatures))
 	requests := make([]rpcRequest, 0, len(signatures))
 	lookups := make([]lookup, 0, len(signatures))
-	nextID := 1
 	for _, sig := range signatures {
 		if sig == "" {
 			continue
@@ -793,9 +799,10 @@ func (c *RPCSolanaClient) fetchTransactionBatch(ctx context.Context, signatures 
 			continue
 		}
 		seen[sig] = struct{}{}
+		requestID := newRPCRequestID()
 		requests = append(requests, rpcRequest{
 			JSONRPC: "2.0",
-			ID:      nextID,
+			ID:      requestID,
 			Method:  "getTransaction",
 			Params: []any{
 				sig,
@@ -806,8 +813,7 @@ func (c *RPCSolanaClient) fetchTransactionBatch(ctx context.Context, signatures 
 				},
 			},
 		})
-		lookups = append(lookups, lookup{id: nextID, signature: sig})
-		nextID++
+		lookups = append(lookups, lookup{id: requestID, signature: sig})
 	}
 	if len(requests) == 0 {
 		return nil, nil
@@ -834,7 +840,7 @@ func (c *RPCSolanaClient) fetchTransactionBatch(ctx context.Context, signatures 
 		return nil, fmt.Errorf("decode batch transaction response: %w", err)
 	}
 
-	idToSignature := make(map[int]string, len(lookups))
+	idToSignature := make(map[string]string, len(lookups))
 	for _, l := range lookups {
 		idToSignature[l.id] = l.signature
 	}
@@ -890,7 +896,7 @@ func (c *RPCSolanaClient) GetInflationReward(ctx context.Context, addresses []st
 
 	payload := rpcRequest{
 		JSONRPC: "2.0",
-		ID:      1,
+		ID:      newRPCRequestID(),
 		Method:  "getInflationReward",
 		Params:  params,
 	}
@@ -950,7 +956,7 @@ func (c *RPCSolanaClient) GetVoteAccounts(ctx context.Context, votePubkey string
 
 	payload := rpcRequest{
 		JSONRPC: "2.0",
-		ID:      1,
+		ID:      newRPCRequestID(),
 		Method:  "getVoteAccounts",
 		Params:  []any{config},
 	}
@@ -1006,7 +1012,7 @@ func (c *RPCSolanaClient) GetVoteAccounts(ctx context.Context, votePubkey string
 func (c *RPCSolanaClient) GetEpochInfo(ctx context.Context) (*EpochInfo, error) {
 	payload := rpcRequest{
 		JSONRPC: "2.0",
-		ID:      1,
+		ID:      newRPCRequestID(),
 		Method:  "getEpochInfo",
 		Params:  []any{},
 	}
@@ -1061,7 +1067,7 @@ func (c *RPCSolanaClient) GetEpochBoundaries(ctx context.Context, minEndTime tim
 func (c *RPCSolanaClient) getBlockTime(ctx context.Context, slot uint64) (time.Time, error) {
 	payload := rpcRequest{
 		JSONRPC: "2.0",
-		ID:      1,
+		ID:      newRPCRequestID(),
 		Method:  "getBlockTime",
 		Params:  []any{slot},
 	}
@@ -1098,14 +1104,14 @@ func (c *RPCSolanaClient) getBlockTime(ctx context.Context, slot uint64) (time.T
 
 type rpcRequest struct {
 	JSONRPC string `json:"jsonrpc"`
-	ID      int    `json:"id"`
+	ID      string `json:"id"`
 	Method  string `json:"method"`
 	Params  []any  `json:"params"`
 }
 
 type rpcGetBalanceResponse struct {
 	JSONRPC string            `json:"jsonrpc"`
-	ID      int               `json:"id"`
+	ID      string            `json:"id"`
 	Result  *rpcBalanceResult `json:"result"`
 	Error   *rpcError         `json:"error"`
 }
@@ -1126,7 +1132,7 @@ type rpcError struct {
 
 type rpcProgramAccountsResponse struct {
 	JSONRPC string              `json:"jsonrpc"`
-	ID      int                 `json:"id"`
+	ID      string              `json:"id"`
 	Result  []rpcProgramAccount `json:"result"`
 	Error   *rpcError           `json:"error"`
 }
@@ -1190,7 +1196,7 @@ func parseUintString(s string) (uint64, error) {
 
 type rpcGetSignaturesResponse struct {
 	JSONRPC string             `json:"jsonrpc"`
-	ID      int                `json:"id"`
+	ID      string             `json:"id"`
 	Result  []rpcSignatureInfo `json:"result"`
 	Error   *rpcError          `json:"error"`
 }
@@ -1203,7 +1209,7 @@ type rpcSignatureInfo struct {
 
 type rpcGetTransactionResponse struct {
 	JSONRPC string                `json:"jsonrpc"`
-	ID      int                   `json:"id"`
+	ID      string                `json:"id"`
 	Result  *rpcTransactionResult `json:"result"`
 	Error   *rpcError             `json:"error"`
 }
@@ -1298,7 +1304,7 @@ func (r *rpcAccountReference) UnmarshalJSON(data []byte) error {
 
 type rpcGetTransactionsForAddressResponse struct {
 	JSONRPC string                  `json:"jsonrpc"`
-	ID      int                     `json:"id"`
+	ID      string                  `json:"id"`
 	Result  []rpcAddressTransaction `json:"result"`
 	Error   *rpcError               `json:"error"`
 }
@@ -1313,7 +1319,7 @@ type rpcAddressTransaction struct {
 
 type rpcGetInflationRewardResponse struct {
 	JSONRPC string                `json:"jsonrpc"`
-	ID      int                   `json:"id"`
+	ID      string                `json:"id"`
 	Result  []*rpcInflationReward `json:"result"`
 	Error   *rpcError             `json:"error"`
 }
@@ -1328,7 +1334,7 @@ type rpcInflationReward struct {
 
 type rpcGetVoteAccountsResponse struct {
 	JSONRPC string               `json:"jsonrpc"`
-	ID      int                  `json:"id"`
+	ID      string               `json:"id"`
 	Result  *rpcVoteAccountsBody `json:"result"`
 	Error   *rpcError            `json:"error"`
 }
@@ -1345,14 +1351,14 @@ type rpcVoteAccount struct {
 
 type rpcGetBlockTimeResponse struct {
 	JSONRPC string    `json:"jsonrpc"`
-	ID      int       `json:"id"`
+	ID      string    `json:"id"`
 	Result  *int64    `json:"result"`
 	Error   *rpcError `json:"error"`
 }
 
 type rpcGetEpochInfoResponse struct {
 	JSONRPC string        `json:"jsonrpc"`
-	ID      int           `json:"id"`
+	ID      string        `json:"id"`
 	Result  *rpcEpochInfo `json:"result"`
 	Error   *rpcError     `json:"error"`
 }
@@ -1366,7 +1372,7 @@ type rpcEpochInfo struct {
 
 type rpcGetEventsResponse struct {
 	JSONRPC string           `json:"jsonrpc"`
-	ID      int              `json:"id"`
+	ID      string           `json:"id"`
 	Result  *rpcEventsResult `json:"result"`
 	Error   *rpcError        `json:"error"`
 }

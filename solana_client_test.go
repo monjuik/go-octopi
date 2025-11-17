@@ -38,7 +38,7 @@ func TestRPCSolanaClientGetBalance(t *testing.T) {
 
 				resp := rpcGetBalanceResponse{
 					JSONRPC: "2.0",
-					ID:      1,
+					ID:      "1",
 					Result: &rpcBalanceResult{
 						Context: rpcContext{Slot: 123},
 						Value:   789000000,
@@ -86,7 +86,7 @@ func TestRPCSolanaClientReturnsError(t *testing.T) {
 			Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 				resp := rpcGetBalanceResponse{
 					JSONRPC: "2.0",
-					ID:      1,
+					ID:      "1",
 					Error: &rpcError{
 						Code:    -32602,
 						Message: "invalid address",
@@ -129,7 +129,7 @@ func TestRPCSolanaClientListStakeAccounts(t *testing.T) {
 
 				resp := `{
 					"jsonrpc":"2.0",
-					"id":1,
+					"id":"1",
 					"result":[
 						{
 							"pubkey":"StakePub111",
@@ -218,7 +218,7 @@ func TestRPCSolanaClientGetTransactionParsesMeta(t *testing.T) {
 			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 				payload := `{
 					"jsonrpc":"2.0",
-					"id":1,
+					"id":"1",
 					"result":{
 						"slot":123,
 						"blockTime":1700000000,
@@ -319,7 +319,7 @@ func TestRPCSolanaClientGetSignaturesForAddress(t *testing.T) {
 
 				resp := `{
 					"jsonrpc":"2.0",
-					"id":1,
+					"id":"1",
 					"result":[
 						{"signature":"sig1","slot":123,"blockTime":1700000000},
 						{"signature":"sig2","slot":124,"blockTime":null}
@@ -362,7 +362,7 @@ func TestRPCSolanaClientGetTransaction(t *testing.T) {
 
 				resp := `{
 					"jsonrpc":"2.0",
-					"id":1,
+					"id":"1",
 					"result":{
 						"slot":567,
 						"blockTime":1700000100,
@@ -421,7 +421,7 @@ func TestRPCSolanaClientGetInflationReward(t *testing.T) {
 
 				resp := `{
 					"jsonrpc":"2.0",
-					"id":1,
+					"id":"1",
 					"result":[
 						{
 							"epoch":879,
@@ -475,7 +475,7 @@ func TestRPCSolanaClientGetEpochInfo(t *testing.T) {
 
 				resp := `{
 					"jsonrpc":"2.0",
-					"id":1,
+					"id":"1",
 					"result":{
 						"epoch":880,
 						"absoluteSlot":123456,
@@ -531,7 +531,7 @@ func TestRPCSolanaClientGetEpochBoundaries(t *testing.T) {
 				case "getEpochInfo":
 					resp := `{
 						"jsonrpc":"2.0",
-						"id":1,
+						"id":"1",
 						"result":{
 							"epoch":1000,
 							"absoluteSlot":10050,
@@ -555,7 +555,7 @@ func TestRPCSolanaClientGetEpochBoundaries(t *testing.T) {
 					}
 					resp := fmt.Sprintf(`{
 						"jsonrpc":"2.0",
-						"id":1,
+						"id":"1",
 						"result":%d
 					}`, ts)
 					return &http.Response{
@@ -614,7 +614,7 @@ func TestRPCSolanaClientRetriesAfter429(t *testing.T) {
 
 				resp := rpcGetBalanceResponse{
 					JSONRPC: "2.0",
-					ID:      1,
+					ID:      "1",
 					Result: &rpcBalanceResult{
 						Context: rpcContext{Slot: 999},
 						Value:   42,
