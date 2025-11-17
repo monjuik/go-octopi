@@ -14,6 +14,9 @@ const (
 	jitoSignaturePageSize  = 25
 	jitoMaxPagesPerStake   = 10
 	jitoProcessedCacheSize = 256
+	jitoEpochLookback      = 3
+	jitoEpochChunkRuns     = 4 // increasing number of runs leads to 429 responses
+	jitoEpochChunkInterval = time.Second
 )
 
 var jitoProgramIDs = map[string]struct{}{
@@ -53,13 +56,62 @@ func collectJitoTips(
 		return nil, nil
 	}
 
-	const jitoEpochLookback = 3
+	if len(targetEpochs) == 0 {
+		return nil, nil
+	}
+
+	maxEpochs := jitoEpochLookback * jitoEpochChunkRuns
+	if len(targetEpochs) > maxEpochs {
+		targetEpochs = targetEpochs[:maxEpochs]
+	}
+
+	var rewardRows []RewardRow
+	for offset := 0; offset < len(targetEpochs); offset += jitoEpochLookback {
+		end := min(offset+jitoEpochLookback, len(targetEpochs))
+
+		chunkRows, err := collectJitoTipsWindow(ctx, collector, stakeAccounts, epochDates, targetEpochs[offset:end], boundaries)
+		if err != nil {
+			return nil, err
+		}
+		rewardRows = append(rewardRows, chunkRows...)
+
+		if end >= len(targetEpochs) {
+			break
+		}
+
+		select {
+		case <-ctx.Done():
+			return rewardRows, ctx.Err()
+		default:
+		}
+
+		time.Sleep(jitoEpochChunkInterval)
+	}
+
+	return rewardRows, nil
+}
+
+func collectJitoTipsWindow(
+	ctx context.Context,
+	collector *jitoTipCollector,
+	stakeAccounts []StakeAccount,
+	epochDates map[uint64]time.Time,
+	targetEpochs []uint64,
+	boundaries []EpochBoundary,
+) ([]RewardRow, error) {
+	if collector == nil || len(stakeAccounts) == 0 || len(targetEpochs) == 0 {
+		return nil, nil
+	}
+
 	allowedEpochs := make(map[uint64]struct{})
 	for i, epoch := range targetEpochs {
 		if i >= jitoEpochLookback {
 			break
 		}
 		allowedEpochs[epoch] = struct{}{}
+	}
+	if len(allowedEpochs) == 0 {
+		return nil, nil
 	}
 
 	stakeInfos := buildStakeAccountIndex(stakeAccounts)
