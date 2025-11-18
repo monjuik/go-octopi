@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -64,6 +66,8 @@ type SolanaClient interface {
 	GetVoteAccounts(ctx context.Context, votePubkey string) ([]VoteAccount, error)
 	LookupValidatorName(ctx context.Context, votePubkey string) (string, error)
 	GetSOLPrice(ctx context.Context) (float64, error)
+	RecordValidatorXIRR(ctx context.Context, votePubkey string, xirrPercent float64)
+	RecentValidatorPerformances(ctx context.Context, limit int) []ValidatorPerformance
 }
 
 // RPCSolanaClient calls the public Solana JSON-RPC endpoint.
@@ -1581,16 +1585,27 @@ type validatorRepository struct {
 	mu        sync.Mutex
 	cache     map[string]validatorCacheEntry
 	nodeCache map[string]nodeCacheEntry
+	now       func() time.Time
 }
 
 type validatorCacheEntry struct {
-	name      string
-	expiresAt time.Time
+	name          string
+	xirr          float64
+	xirrUpdatedAt time.Time
+	expiresAt     time.Time
 }
 
 type nodeCacheEntry struct {
 	value     string
 	expiresAt time.Time
+}
+
+// ValidatorPerformance captures the cached XIRR data for a validator.
+type ValidatorPerformance struct {
+	VoteAccount string
+	Name        string
+	XIRR        float64
+	UpdatedAt   time.Time
 }
 
 func newValidatorRepository(apiKey string, solana SolanaClient, logger Logger) *validatorRepository {
@@ -1606,7 +1621,18 @@ func newValidatorRepository(apiKey string, solana SolanaClient, logger Logger) *
 		solana:    solana,
 		cache:     make(map[string]validatorCacheEntry),
 		nodeCache: make(map[string]nodeCacheEntry),
+		now:       time.Now,
 	}
+}
+
+func (r *validatorRepository) currentTime() time.Time {
+	if r == nil {
+		return time.Now()
+	}
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
 }
 
 func (r *validatorRepository) LookupName(ctx context.Context, accountID string) (string, error) {
@@ -1656,7 +1682,7 @@ func (r *validatorRepository) cached(accountID string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if time.Now().After(entry.expiresAt) {
+	if r.currentTime().After(entry.expiresAt) {
 		delete(r.cache, accountID)
 		return "", false
 	}
@@ -1670,10 +1696,82 @@ func (r *validatorRepository) store(accountID, name string) {
 	if r.cache == nil {
 		r.cache = make(map[string]validatorCacheEntry)
 	}
-	r.cache[accountID] = validatorCacheEntry{
-		name:      name,
-		expiresAt: time.Now().Add(r.ttl),
+	entry := r.cache[accountID]
+	entry.name = name
+	entry.expiresAt = r.currentTime().Add(r.ttl)
+	r.cache[accountID] = entry
+}
+
+func (r *validatorRepository) recordXIRR(accountID string, value float64) {
+	if r == nil {
+		return
 	}
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" || math.IsNaN(value) {
+		return
+	}
+
+	now := r.currentTime()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.cache == nil {
+		r.cache = make(map[string]validatorCacheEntry)
+	}
+	entry := r.cache[accountID]
+	entry.xirr = value
+	entry.xirrUpdatedAt = now
+	entry.expiresAt = now.Add(r.ttl)
+	if entry.name == "" {
+		entry.name = accountID
+	}
+	r.cache[accountID] = entry
+}
+
+func (r *validatorRepository) recentValidators(limit int) []ValidatorPerformance {
+	if r == nil || limit <= 0 {
+		return nil
+	}
+
+	now := r.currentTime()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	results := make([]ValidatorPerformance, 0, limit)
+	for vote, entry := range r.cache {
+		if entry.xirrUpdatedAt.IsZero() {
+			continue
+		}
+		if !entry.expiresAt.IsZero() && now.After(entry.expiresAt) {
+			delete(r.cache, vote)
+			continue
+		}
+		results = append(results, ValidatorPerformance{
+			VoteAccount: vote,
+			Name:        entry.name,
+			XIRR:        entry.xirr,
+			UpdatedAt:   entry.xirrUpdatedAt,
+		})
+	}
+	if len(results) == 0 {
+		return nil
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].UpdatedAt.Equal(results[j].UpdatedAt) {
+			return results[i].VoteAccount < results[j].VoteAccount
+		}
+		return results[i].UpdatedAt.After(results[j].UpdatedAt)
+	})
+	if limit < len(results) {
+		results = results[:limit]
+	}
+
+	copied := make([]ValidatorPerformance, len(results))
+	copy(copied, results)
+	return copied
 }
 
 func (r *validatorRepository) lookupNodePubkey(ctx context.Context, votePubkey string) (string, error) {
@@ -1789,6 +1887,22 @@ func (c *RPCSolanaClient) LookupValidatorName(ctx context.Context, votePubkey st
 		return "", fmt.Errorf("validator repository not configured")
 	}
 	return repo.LookupName(ctx, votePubkey)
+}
+
+func (c *RPCSolanaClient) RecordValidatorXIRR(_ context.Context, votePubkey string, xirr float64) {
+	repo := c.ensureValidatorRepository()
+	if repo == nil {
+		return
+	}
+	repo.recordXIRR(votePubkey, xirr)
+}
+
+func (c *RPCSolanaClient) RecentValidatorPerformances(_ context.Context, limit int) []ValidatorPerformance {
+	repo := c.ensureValidatorRepository()
+	if repo == nil {
+		return nil
+	}
+	return repo.recentValidators(limit)
 }
 
 func (c *RPCSolanaClient) GetSOLPrice(ctx context.Context) (float64, error) {

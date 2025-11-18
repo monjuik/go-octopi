@@ -861,6 +861,62 @@ func TestRPCSolanaClientGetSOLPriceErrorsWithoutCache(t *testing.T) {
 	}
 }
 
+func TestValidatorRepositoryRecordXIRRAndRecent(t *testing.T) {
+	repo := newValidatorRepository("token", nil, nil)
+	if repo == nil {
+		t.Fatalf("expected repository")
+	}
+	base := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
+	repo.now = func() time.Time { return base }
+
+	repo.recordXIRR("Vote111", 5.5)
+	repo.store("Vote111", "Atlas Nodes")
+
+	stats := repo.recentValidators(5)
+	if len(stats) != 1 {
+		t.Fatalf("expected single entry, got %d", len(stats))
+	}
+	entry := stats[0]
+	if entry.VoteAccount != "Vote111" {
+		t.Fatalf("unexpected vote account: %s", entry.VoteAccount)
+	}
+	if entry.Name != "Atlas Nodes" {
+		t.Fatalf("unexpected name: %s", entry.Name)
+	}
+	if math.Abs(entry.XIRR-5.5) > 1e-9 {
+		t.Fatalf("unexpected xirr: %.2f", entry.XIRR)
+	}
+	if !entry.UpdatedAt.Equal(base) {
+		t.Fatalf("unexpected updated time: %s", entry.UpdatedAt)
+	}
+}
+
+func TestValidatorRepositoryRecentRespectsTTL(t *testing.T) {
+	repo := newValidatorRepository("token", nil, nil)
+	if repo == nil {
+		t.Fatalf("expected repository")
+	}
+	base := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
+	repo.now = func() time.Time { return base }
+	repo.recordXIRR("VoteA", 4.2)
+	repo.store("VoteA", "Alpha")
+
+	repo.now = func() time.Time { return base.Add(time.Hour) }
+	repo.recordXIRR("VoteB", 6.1)
+	repo.store("VoteB", "Beta")
+
+	stats := repo.recentValidators(1)
+	if len(stats) != 1 || stats[0].VoteAccount != "VoteB" {
+		t.Fatalf("expected newest entry first, got %#v", stats)
+	}
+
+	repo.now = func() time.Time { return base.Add(repo.ttl + 2*time.Hour) }
+	stats = repo.recentValidators(5)
+	if len(stats) != 0 {
+		t.Fatalf("expected entries to expire, got %#v", stats)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {

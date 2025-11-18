@@ -18,6 +18,16 @@
     height: 3rem;
     font-size: 1.1rem;
   }
+  .hero-container .card {
+    border: 0;
+    border-radius: 1rem;
+  }
+  .shadow-soft {
+    box-shadow: 0 0.25rem 1rem rgba(0, 0, 0, 0.05);
+  }
+  .recent-validators-card {
+    text-align: left;
+  }
 </style>
 
 <div class="hero-container">
@@ -46,6 +56,49 @@
     <button class="btn btn-outline-secondary btn-sm" id="demoWallet">
       <i class="bi bi-lightning-charge"></i> Try demo wallet
     </button>
+  </div>
+
+  <div class="card shadow-soft mt-5 recent-validators-card">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+        <h5 class="mb-0">Recent validators</h5>
+        <span class="text-muted small">Latest XIRR snapshots</span>
+      </div>
+      <div class="table-responsive">
+        <table class="table align-middle mb-0">
+          <thead>
+            <tr>
+              <th scope="col">Validator</th>
+              <th scope="col" class="text-end">XIRR</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{ if .RecentVals }}
+              {{ range .RecentVals }}
+              <tr>
+                <td>
+                  <div class="fw-semibold">{{ if .Name }}{{ .Name }}{{ else }}{{ .VoteAccount }}{{ end }}</div>
+                  <div class="text-muted small">{{ .VoteAccount }}</div>
+                </td>
+                <td class="text-end">
+                  <div class="fw-semibold">{{ printf "%.2f%%" .XIRR }}</div>
+                  {{ if not (.UpdatedAt.IsZero) }}
+                  <div class="text-muted small">{{ .UpdatedAt.Format "02 Jan 15:04 UTC" }}</div>
+                  {{ end }}
+                </td>
+              </tr>
+              {{ end }}
+            {{ else }}
+              <tr>
+                <td colspan="2" class="text-center text-muted py-4">
+                  No validators sampled yet. Open a wallet to start tracking.
+                </td>
+              </tr>
+            {{ end }}
+          </tbody>
+        </table>
+      </div>
+    </div>
   </div>
 </div>
 

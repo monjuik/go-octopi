@@ -105,6 +105,7 @@ type TemplateData struct {
 	BodyClass   string
 	IsDemo      bool
 	Wallet      *WalletData
+	RecentVals  []ValidatorPerformance
 }
 
 // WalletData models the mock wallet view.
@@ -131,14 +132,15 @@ type WalletMetric struct {
 
 // RewardRow represents a historical reward entry.
 type RewardRow struct {
-	Date           string
-	Type           string
-	AmountSOL      string
-	AmountSOLValue float64
-	AmountUSD      string
-	Validator      string
-	Epoch          int
-	Timestamp      time.Time
+	Date                 string
+	Type                 string
+	AmountSOL            string
+	AmountSOLValue       float64
+	AmountUSD            string
+	ValidatorVoteAccount string
+	Validator            string
+	Epoch                int
+	Timestamp            time.Time
 }
 
 type walletChart struct {
@@ -221,12 +223,28 @@ func (s *server) handleHome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	recent := s.recentValidatorStats(r.Context(), 6)
+
 	renderTemplate(w, "home", TemplateData{
 		Title:       "OctoPi — Home",
 		Footer:      defaultFooter,
 		LogoDataURI: logoDataURI,
 		BodyClass:   "home",
+		RecentVals:  recent,
 	})
+}
+
+func (s *server) recentValidatorStats(ctx context.Context, limit int) []ValidatorPerformance {
+	if s == nil || s.solanaClient == nil || limit <= 0 {
+		return nil
+	}
+	stats := s.solanaClient.RecentValidatorPerformances(ctx, limit)
+	if len(stats) == 0 {
+		return nil
+	}
+	cloned := make([]ValidatorPerformance, len(stats))
+	copy(cloned, stats)
+	return cloned
 }
 
 func (s *server) handleWalletDemo(w http.ResponseWriter, _ *http.Request) {
@@ -324,6 +342,9 @@ func (s *server) handleWallet(w http.ResponseWriter, r *http.Request) {
 	walletView.Metrics = buildWalletMetrics(now, walletView.DelegatedSOL, recentRewards, boundaries, epochInfo, priceUSD, priceErr == nil)
 	if priceErr == nil && priceUSD > 0 && len(recentRewards) > 0 {
 		applyRewardFiatValues(recentRewards, priceUSD)
+	}
+	if len(stakeAccounts) > 0 && len(recentRewards) > 0 {
+		s.recordValidatorXIRR(ctx, now, stakeAccounts, recentRewards, boundaries, epochInfo)
 	}
 	if len(recentRewards) > 0 {
 		walletView.Rewards = recentRewards
@@ -871,13 +892,14 @@ func (s *server) collectRecentRewards(ctx context.Context, now time.Time, stakeA
 			)
 
 			rewardRows = append(rewardRows, RewardRow{
-				Date:           formatRewardDate(epochDates[reward.Epoch], reward.Epoch),
-				Type:           "Staking Reward",
-				AmountSOL:      formatNumber(amountSOL),
-				AmountSOLValue: amountSOL,
-				Validator:      account.VoteAccount,
-				Epoch:          int(reward.Epoch),
-				Timestamp:      epochDates[reward.Epoch],
+				Date:                 formatRewardDate(epochDates[reward.Epoch], reward.Epoch),
+				Type:                 "Staking Reward",
+				AmountSOL:            formatNumber(amountSOL),
+				AmountSOLValue:       amountSOL,
+				ValidatorVoteAccount: account.VoteAccount,
+				Validator:            account.VoteAccount,
+				Epoch:                int(reward.Epoch),
+				Timestamp:            epochDates[reward.Epoch],
 			})
 		}
 	}
@@ -966,7 +988,10 @@ func (s *server) decorateRewardValidators(ctx context.Context, rewards []RewardR
 
 	cache := make(map[string]string)
 	for i := range rewards {
-		id := strings.TrimSpace(rewards[i].Validator)
+		id := strings.TrimSpace(rewards[i].ValidatorVoteAccount)
+		if id == "" {
+			id = strings.TrimSpace(rewards[i].Validator)
+		}
 		if id == "" {
 			continue
 		}
@@ -983,6 +1008,56 @@ func (s *server) decorateRewardValidators(ctx context.Context, rewards []RewardR
 
 		if name != "" {
 			rewards[i].Validator = name
+		}
+	}
+}
+
+func (s *server) recordValidatorXIRR(
+	ctx context.Context,
+	now time.Time,
+	stakeAccounts []StakeAccount,
+	rewards []RewardRow,
+	boundaries []EpochBoundary,
+	epochInfo *EpochInfo,
+) {
+	if s == nil || s.solanaClient == nil || len(stakeAccounts) == 0 || len(rewards) == 0 {
+		return
+	}
+
+	delegated := make(map[string]float64)
+	for _, account := range stakeAccounts {
+		id := strings.TrimSpace(account.VoteAccount)
+		if id == "" || account.DelegatedLamports == 0 {
+			continue
+		}
+		delegated[id] += float64(account.DelegatedLamports) / lamportsPerSOL
+	}
+	if len(delegated) == 0 {
+		return
+	}
+
+	rewardIndex := make(map[string][]RewardRow)
+	for _, reward := range rewards {
+		id := strings.TrimSpace(reward.ValidatorVoteAccount)
+		if id == "" {
+			continue
+		}
+		rewardIndex[id] = append(rewardIndex[id], reward)
+	}
+	if len(rewardIndex) == 0 {
+		return
+	}
+
+	for id, total := range delegated {
+		if total <= 0 {
+			continue
+		}
+		rows := rewardIndex[id]
+		if len(rows) == 0 {
+			continue
+		}
+		if rate, ok := computeAnnualReturnPercent(now, total, rows, boundaries, epochInfo); ok && !math.IsNaN(rate) {
+			s.solanaClient.RecordValidatorXIRR(ctx, id, rate)
 		}
 	}
 }

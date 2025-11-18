@@ -233,7 +233,8 @@ func (c *jitoTipCollector) collectStakeAccountTips(
 					continue
 				}
 
-				validator := account.validator
+				votePubkey := account.validator
+				validator := votePubkey
 				if validator == "" {
 					validator = "Unknown"
 				}
@@ -247,13 +248,14 @@ func (c *jitoTipCollector) collectStakeAccountTips(
 
 				amountSOL := float64(lamports) / lamportsPerSOL
 				rows = append(rows, RewardRow{
-					Date:           formatRewardDate(timestamp, epoch),
-					Type:           "Jito Tip",
-					AmountSOL:      formatNumber(amountSOL),
-					AmountSOLValue: amountSOL,
-					Validator:      validator,
-					Epoch:          int(epoch),
-					Timestamp:      timestamp,
+					Date:                 formatRewardDate(timestamp, epoch),
+					Type:                 "Jito Tip",
+					AmountSOL:            formatNumber(amountSOL),
+					AmountSOLValue:       amountSOL,
+					Validator:            validator,
+					ValidatorVoteAccount: votePubkey,
+					Epoch:                int(epoch),
+					Timestamp:            timestamp,
 				})
 
 				c.markSignatureProcessed(signature)

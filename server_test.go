@@ -53,6 +53,41 @@ func TestServerIndexRendering(t *testing.T) {
 	}
 }
 
+func TestHomePageShowsRecentValidators(t *testing.T) {
+	ensureHeliusEnv(t)
+
+	now := time.Date(2025, time.January, 2, 15, 4, 0, 0, time.UTC)
+	stub := &stubSolanaClient{
+		validatorPerformances: []ValidatorPerformance{
+			{
+				Name:        "Atlas Nodes",
+				VoteAccount: "Vote111",
+				XIRR:        5.5,
+				UpdatedAt:   now,
+			},
+		},
+	}
+
+	rec := performRequest(t, NewServer(WithSolanaClient(stub)), http.MethodGet, "/")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: got %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "Recent validators") {
+		t.Fatalf("expected recent validators section in body: %q", body)
+	}
+	if !strings.Contains(body, "Atlas Nodes") {
+		t.Fatalf("expected validator name to be rendered: %q", body)
+	}
+	if !strings.Contains(body, "5.50%") {
+		t.Fatalf("expected formatted XIRR in body: %q", body)
+	}
+	if !strings.Contains(body, now.Format("02 Jan 15:04 UTC")) {
+		t.Fatalf("expected timestamp in body: %q", body)
+	}
+}
+
 func TestWalletPageRendering(t *testing.T) {
 	ensureHeliusEnv(t)
 
@@ -350,40 +385,83 @@ func TestComputeAnnualReturnPercent(t *testing.T) {
 	}
 }
 
+func TestServerRecordValidatorXIRR(t *testing.T) {
+	now := time.Date(2025, time.March, 1, 0, 0, 0, 0, time.UTC)
+	rewardTime := now.Add(-15 * 24 * time.Hour)
+	rewards := []RewardRow{
+		{Epoch: 42, Timestamp: rewardTime, AmountSOLValue: 2, ValidatorVoteAccount: "Vote111"},
+		{Epoch: 43, Timestamp: rewardTime.Add(3 * 24 * time.Hour), AmountSOLValue: 2, ValidatorVoteAccount: "Vote111"},
+	}
+	boundaries := []EpochBoundary{
+		{Epoch: 42, EndTime: rewardTime},
+		{Epoch: 41, EndTime: rewardTime.Add(-3 * 24 * time.Hour)},
+	}
+	epochInfo := &EpochInfo{Epoch: 50, AbsoluteSlot: 1_000_000, SlotIndex: 100, SlotsInEpoch: 400}
+	stakeAccounts := []StakeAccount{
+		{VoteAccount: "Vote111", DelegatedLamports: uint64(lamportsPerSOL * 100)},
+	}
+
+	stub := &stubSolanaClient{}
+	srv := &server{solanaClient: stub}
+	srv.recordValidatorXIRR(context.Background(), now, stakeAccounts, rewards, boundaries, epochInfo)
+
+	if len(stub.recordedValidatorXIRR) != 1 {
+		t.Fatalf("expected single validator record, got %d", len(stub.recordedValidatorXIRR))
+	}
+	call := stub.recordedValidatorXIRR[0]
+	if call.vote != "Vote111" {
+		t.Fatalf("unexpected validator recorded: %s", call.vote)
+	}
+	expected, ok := computeAnnualReturnPercent(now, 100, rewards, boundaries, epochInfo)
+	if !ok {
+		t.Fatalf("expected annual return percent")
+	}
+	if math.Abs(call.value-expected) > 1e-6 {
+		t.Fatalf("unexpected recorded XIRR: got %.6f want %.6f", call.value, expected)
+	}
+}
+
 type stubSolanaClient struct {
-	balance             uint64
-	err                 error
-	calledWith          string
-	stakeAccounts       []StakeAccount
-	stakeErr            error
-	listStakeCalled     bool
-	signaturesByAddress map[string][]SignatureInfo
-	signaturesErr       error
-	signaturesRequested []string
-	transactions        map[string]*TransactionDetail
-	transactionErr      error
-	transactionsReq     []string
-	eventsErr           error
-	eventsByAuthority   map[string][]Event
-	eventRequests       []GetEventsRequest
-	epochInfo           *EpochInfo
-	epochErr            error
-	epochBoundaries     []EpochBoundary
-	epochBoundariesErr  error
-	epochBoundaryReqs   []time.Time
-	currentEpochEnd     time.Time
-	currentEpochEndErr  error
-	inflationRewards    map[uint64]map[string]*InflationReward
-	inflationErr        error
-	inflationRequests   [][]string
-	inflationEpochs     []uint64
-	voteAccounts        map[string]VoteAccount
-	voteErr             error
-	validatorNames      map[string]string
-	validatorLookupErr  error
-	solPriceUSD         float64
-	solPriceErr         error
-	solPriceCalls       int
+	balance               uint64
+	err                   error
+	calledWith            string
+	stakeAccounts         []StakeAccount
+	stakeErr              error
+	listStakeCalled       bool
+	signaturesByAddress   map[string][]SignatureInfo
+	signaturesErr         error
+	signaturesRequested   []string
+	transactions          map[string]*TransactionDetail
+	transactionErr        error
+	transactionsReq       []string
+	eventsErr             error
+	eventsByAuthority     map[string][]Event
+	eventRequests         []GetEventsRequest
+	epochInfo             *EpochInfo
+	epochErr              error
+	epochBoundaries       []EpochBoundary
+	epochBoundariesErr    error
+	epochBoundaryReqs     []time.Time
+	currentEpochEnd       time.Time
+	currentEpochEndErr    error
+	inflationRewards      map[uint64]map[string]*InflationReward
+	inflationErr          error
+	inflationRequests     [][]string
+	inflationEpochs       []uint64
+	voteAccounts          map[string]VoteAccount
+	voteErr               error
+	validatorNames        map[string]string
+	validatorLookupErr    error
+	validatorPerformances []ValidatorPerformance
+	recordedValidatorXIRR []validatorXIRRCall
+	solPriceUSD           float64
+	solPriceErr           error
+	solPriceCalls         int
+}
+
+type validatorXIRRCall struct {
+	vote  string
+	value float64
 }
 
 func (s *stubSolanaClient) GetBalance(_ context.Context, address string) (uint64, error) {
@@ -582,6 +660,25 @@ func (s *stubSolanaClient) LookupValidatorName(_ context.Context, votePubkey str
 		return "", nil
 	}
 	return s.validatorNames[votePubkey], nil
+}
+
+func (s *stubSolanaClient) RecordValidatorXIRR(_ context.Context, votePubkey string, xirr float64) {
+	s.recordedValidatorXIRR = append(s.recordedValidatorXIRR, validatorXIRRCall{
+		vote:  votePubkey,
+		value: xirr,
+	})
+}
+
+func (s *stubSolanaClient) RecentValidatorPerformances(_ context.Context, limit int) []ValidatorPerformance {
+	if limit <= 0 || len(s.validatorPerformances) == 0 {
+		return nil
+	}
+	if limit > len(s.validatorPerformances) {
+		limit = len(s.validatorPerformances)
+	}
+	out := make([]ValidatorPerformance, limit)
+	copy(out, s.validatorPerformances[:limit])
+	return out
 }
 
 func (s *stubSolanaClient) GetSOLPrice(_ context.Context) (float64, error) {
