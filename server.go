@@ -102,6 +102,7 @@ type TemplateData struct {
 	Footer      string
 	LogoDataURI template.URL
 	BodyClass   string
+	IsDemo      bool
 	Wallet      *WalletData
 }
 
@@ -232,6 +233,7 @@ func (s *server) handleWalletDemo(w http.ResponseWriter, _ *http.Request) {
 		Footer:      defaultFooter,
 		LogoDataURI: logoDataURI,
 		BodyClass:   "wallet",
+		IsDemo:      true,
 		Wallet:      demoWalletData(),
 	})
 }
