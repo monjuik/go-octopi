@@ -371,6 +371,8 @@ type stubSolanaClient struct {
 	epochBoundaries     []EpochBoundary
 	epochBoundariesErr  error
 	epochBoundaryReqs   []time.Time
+	currentEpochEnd     time.Time
+	currentEpochEndErr  error
 	inflationRewards    map[uint64]map[string]*InflationReward
 	inflationErr        error
 	inflationRequests   [][]string
@@ -507,6 +509,19 @@ func (s *stubSolanaClient) GetEpochInfo(_ context.Context) (*EpochInfo, error) {
 	}
 	copyInfo := *s.epochInfo
 	return &copyInfo, nil
+}
+
+func (s *stubSolanaClient) GetCurrentEpochEnd(_ context.Context) (time.Time, error) {
+	if s.currentEpochEndErr != nil {
+		return time.Time{}, s.currentEpochEndErr
+	}
+	if !s.currentEpochEnd.IsZero() {
+		return s.currentEpochEnd, nil
+	}
+	if s.epochInfo == nil {
+		return time.Time{}, fmt.Errorf("epoch info not set")
+	}
+	return estimateCurrentEpochEnd(time.Now(), s.epochInfo), nil
 }
 
 func (s *stubSolanaClient) GetEvents(_ context.Context, req GetEventsRequest) (*EventsPage, error) {

@@ -52,6 +52,7 @@ type server struct {
 	solanaClient SolanaClient
 	logger       Logger
 	tipCollector *jitoTipCollector
+	walletCache  *walletSummaryCache
 }
 
 type serverConfig struct {
@@ -172,6 +173,7 @@ func NewServer(opts ...ServerOption) http.Handler {
 	srv := &server{
 		solanaClient: cfg.solanaClient,
 		logger:       cfg.logger,
+		walletCache:  newWalletSummaryCache(),
 	}
 	srv.tipCollector = newJitoTipCollector(cfg.solanaClient, cfg.logger)
 
@@ -291,9 +293,19 @@ func (s *server) handleWallet(w http.ResponseWriter, r *http.Request) {
 		s.logger.Printf("epoch boundaries fetch warning address=%s error=%v", address, boundaryErr)
 	}
 
-	recentRewards, rewardsErr := s.collectRecentRewards(ctx, now, stakeAccounts, boundaries)
-	if rewardsErr != nil {
-		s.logger.Printf("stake rewards fetch warning address=%s error=%v", address, rewardsErr)
+	var recentRewards []RewardRow
+	if cached, ok := s.getCachedWalletRewards(address, now); ok {
+		recentRewards = cached
+	} else {
+		rows, rewardsErr := s.collectRecentRewards(ctx, now, stakeAccounts, boundaries)
+		if rewardsErr != nil {
+			s.logger.Printf("stake rewards fetch warning address=%s error=%v", address, rewardsErr)
+		} else {
+			recentRewards = rows
+			if err := s.cacheWalletRewards(ctx, address, recentRewards, now); err != nil {
+				s.logger.Printf("wallet summary cache warning address=%s error=%v", address, err)
+			}
+		}
 	}
 
 	priceUSD, priceErr := s.solanaClient.GetSOLPrice(ctx)
@@ -923,6 +935,28 @@ func rewardMetricSubtext(rewardSum float64, priceUSD float64, hasPrice bool) str
 		return formatFiatUSD(rewardSum * priceUSD)
 	}
 	return "Last 28 days"
+}
+
+func (s *server) getCachedWalletRewards(address string, now time.Time) ([]RewardRow, bool) {
+	if s == nil || s.walletCache == nil {
+		return nil, false
+	}
+	return s.walletCache.Get(strings.TrimSpace(address), now)
+}
+
+func (s *server) cacheWalletRewards(ctx context.Context, address string, rewards []RewardRow, now time.Time) error {
+	if s == nil || s.walletCache == nil || s.solanaClient == nil {
+		return nil
+	}
+	expiry, err := s.solanaClient.GetCurrentEpochEnd(ctx)
+	if err != nil {
+		return err
+	}
+	if expiry.IsZero() || !expiry.After(now) {
+		return fmt.Errorf("invalid epoch expiry %s", expiry.Format(time.RFC3339))
+	}
+	s.walletCache.Add(strings.TrimSpace(address), rewards, expiry)
+	return nil
 }
 
 func (s *server) decorateRewardValidators(ctx context.Context, rewards []RewardRow) {
