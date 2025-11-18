@@ -351,6 +351,48 @@ func TestRPCSolanaClientGetSignaturesForAddress(t *testing.T) {
 	}
 }
 
+func TestRPCSolanaClientGetSignaturesCachesResults(t *testing.T) {
+	t.Parallel()
+
+	var calls int
+	client := &RPCSolanaClient{
+		Endpoint: "http://solana.test",
+		HTTPClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				body := `{
+					"jsonrpc":"2.0",
+					"id":"1",
+					"result":[{"signature":"sig-cache","slot":42}]
+				}`
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(bytes.NewBufferString(body)),
+					Header:     make(http.Header),
+				}, nil
+			}),
+		},
+		cacheConfig: cacheSettings{
+			signatures: cacheConfig{maxEntries: 10, ttl: time.Minute},
+		},
+		cacheConfigured: true,
+	}
+
+	ctx := context.Background()
+	for i := 0; i < 2; i++ {
+		sigs, err := client.GetSignaturesForAddress(ctx, "Stake111", 1, "")
+		if err != nil {
+			t.Fatalf("GetSignaturesForAddress returned error: %v", err)
+		}
+		if len(sigs) != 1 || sigs[0].Signature != "sig-cache" {
+			t.Fatalf("unexpected cache entry: %#v", sigs)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 RPC call, got %d", calls)
+	}
+}
+
 func TestRPCSolanaClientGetTransaction(t *testing.T) {
 	t.Parallel()
 
@@ -403,6 +445,47 @@ func TestRPCSolanaClientGetTransaction(t *testing.T) {
 	}
 	if len(tx.Meta.Rewards) != 1 || tx.Meta.Rewards[0].Pubkey != "StakePub111" {
 		t.Fatalf("unexpected rewards: %#v", tx.Meta.Rewards)
+	}
+}
+
+func TestRPCSolanaClientGetTransactionCaches(t *testing.T) {
+	t.Parallel()
+
+	var calls int
+	client := &RPCSolanaClient{
+		Endpoint: "http://solana.test",
+		HTTPClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				payload := `{
+					"jsonrpc":"2.0",
+					"id":"1",
+					"result":{
+						"slot":999,
+						"meta":{"rewards":[]}
+					}
+				}`
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(bytes.NewBufferString(payload)),
+					Header:     make(http.Header),
+				}, nil
+			}),
+		},
+		cacheConfig: cacheSettings{
+			transactions: cacheConfig{maxEntries: 10, ttl: time.Minute},
+		},
+		cacheConfigured: true,
+	}
+
+	ctx := context.Background()
+	for i := 0; i < 2; i++ {
+		if _, err := client.GetTransaction(ctx, "sig-cache"); err != nil {
+			t.Fatalf("GetTransaction returned error: %v", err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("expected single network call, got %d", calls)
 	}
 }
 
@@ -461,6 +544,49 @@ func TestRPCSolanaClientGetInflationReward(t *testing.T) {
 	}
 	if rewards[1] != nil {
 		t.Fatalf("expected nil reward for second address")
+	}
+}
+
+func TestRPCSolanaClientGetInflationRewardCachesByRequest(t *testing.T) {
+	t.Parallel()
+
+	var calls int
+	client := &RPCSolanaClient{
+		Endpoint: "http://solana.test",
+		HTTPClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				resp := `{
+					"jsonrpc":"2.0",
+					"id":"1",
+					"result":[{"epoch":1,"effectiveSlot":10,"amount":5,"postBalance":20,"commission":1}]
+				}`
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(bytes.NewBufferString(resp)),
+					Header:     make(http.Header),
+				}, nil
+			}),
+		},
+		cacheConfig: cacheSettings{
+			rewards: cacheConfig{maxEntries: 5, ttl: time.Minute},
+		},
+		cacheConfigured: true,
+	}
+
+	ctx := context.Background()
+	addresses := []string{"Stake1"}
+	for i := 0; i < 2; i++ {
+		rewards, err := client.GetInflationReward(ctx, addresses, nil)
+		if err != nil {
+			t.Fatalf("GetInflationReward returned error: %v", err)
+		}
+		if len(rewards) != 1 || rewards[0].Epoch != 1 {
+			t.Fatalf("unexpected rewards: %#v", rewards)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("expected single RPC call, got %d", calls)
 	}
 }
 

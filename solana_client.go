@@ -67,15 +67,21 @@ type SolanaClient interface {
 
 // RPCSolanaClient calls the public Solana JSON-RPC endpoint.
 type RPCSolanaClient struct {
-	Endpoint        string
-	HTTPClient      *http.Client
-	Logger          Logger
-	epochCache      *epochCache
-	validators      *validatorRepository
-	validatorAPIKey string
-	validatorRepoMu sync.Mutex
-	priceRepo       *solPriceRepository
-	priceRepoMu     sync.Mutex
+	Endpoint         string
+	HTTPClient       *http.Client
+	Logger           Logger
+	epochCache       *epochCache
+	validators       *validatorRepository
+	validatorAPIKey  string
+	validatorRepoMu  sync.Mutex
+	priceRepo        *solPriceRepository
+	priceRepoMu      sync.Mutex
+	cacheInitOnce    sync.Once
+	cacheConfig      cacheSettings
+	cacheConfigured  bool
+	signatureCache   *methodCache[[]SignatureInfo]
+	transactionCache *methodCache[*TransactionDetail]
+	rewardCache      *methodCache[[]*InflationReward]
 }
 
 func (c *RPCSolanaClient) logger() Logger {
@@ -83,6 +89,48 @@ func (c *RPCSolanaClient) logger() Logger {
 		return c.Logger
 	}
 	return solanaRPCLogger
+}
+
+func (c *RPCSolanaClient) ensureCaches() {
+	if c == nil {
+		return
+	}
+	c.cacheInitOnce.Do(func() {
+		cfg := c.cacheConfig
+		if !c.cacheConfigured {
+			cfg = defaultCacheSettings
+		}
+		c.cacheConfig = cfg
+		c.cacheConfigured = true
+		c.signatureCache = newMethodCache[[]SignatureInfo](cfg.signatures)
+		c.transactionCache = newMethodCache[*TransactionDetail](cfg.transactions)
+		c.rewardCache = newMethodCache[[]*InflationReward](cfg.rewards)
+		if cfg.janitorInterval > 0 {
+			go c.startCacheJanitor(cfg.janitorInterval)
+		}
+	})
+}
+
+func (c *RPCSolanaClient) startCacheJanitor(interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer ticker.Stop()
+		for range ticker.C {
+			now := time.Now()
+			if c.signatureCache != nil {
+				c.signatureCache.PurgeExpired(now)
+			}
+			if c.transactionCache != nil {
+				c.transactionCache.PurgeExpired(now)
+			}
+			if c.rewardCache != nil {
+				c.rewardCache.PurgeExpired(now)
+			}
+		}
+	}()
 }
 
 // StakeAccount carries parsed information about a delegated stake account.
@@ -349,6 +397,12 @@ func (c *RPCSolanaClient) GetSignaturesForAddress(ctx context.Context, address s
 		limit = 1
 	}
 
+	c.ensureCaches()
+	cacheKey := buildSignaturesCacheKey(address, limit, before)
+	if entries, ok := c.signatureCache.Get(cacheKey); ok {
+		return cloneSignatureInfos(entries), nil
+	}
+
 	c.logger().Printf("getSignaturesForAddress address=%s limit=%d before=%s", address, limit, before)
 
 	payload := rpcRequest{
@@ -402,11 +456,19 @@ func (c *RPCSolanaClient) GetSignaturesForAddress(ctx context.Context, address s
 			BlockTime: item.BlockTime,
 		})
 	}
+	if cacheKey != "" {
+		c.signatureCache.Add(cacheKey, cloneSignatureInfos(results))
+	}
 	return results, nil
 }
 
 // GetTransaction fetches a parsed transaction and returns its reward data.
 func (c *RPCSolanaClient) GetTransaction(ctx context.Context, signature string) (*TransactionDetail, error) {
+	c.ensureCaches()
+	if detail, ok := c.getCachedTransaction(signature); ok {
+		return detail, nil
+	}
+
 	payload := rpcRequest{
 		JSONRPC: "2.0",
 		ID:      newRPCRequestID(),
@@ -452,6 +514,7 @@ func (c *RPCSolanaClient) GetTransaction(ctx context.Context, signature string) 
 	if detail == nil {
 		return nil, fmt.Errorf("transaction details missing")
 	}
+	c.transactionCache.Add(signature, detail)
 	return detail, nil
 }
 
@@ -767,14 +830,36 @@ func (c *RPCSolanaClient) GetTransactions(ctx context.Context, signatures []stri
 		return nil, nil
 	}
 
+	c.ensureCaches()
+
 	results := make(map[string]*TransactionDetail, len(signatures))
-	signatureBatches := batchSignatures(signatures, maxTransactionBatchLen)
+	missing := make([]string, 0, len(signatures))
+	seen := make(map[string]struct{}, len(signatures))
+	for _, sig := range signatures {
+		if sig == "" {
+			continue
+		}
+		if _, ok := seen[sig]; ok {
+			continue
+		}
+		seen[sig] = struct{}{}
+		if detail, ok := c.getCachedTransaction(sig); ok {
+			results[sig] = detail
+			continue
+		}
+		missing = append(missing, sig)
+	}
+	if len(missing) == 0 {
+		return results, nil
+	}
+	signatureBatches := batchSignatures(missing, maxTransactionBatchLen)
 	for _, batch := range signatureBatches {
 		batchResults, err := c.fetchTransactionBatch(ctx, batch)
 		if err != nil {
 			return nil, err
 		}
 		for sig, detail := range batchResults {
+			c.transactionCache.Add(sig, detail)
 			results[sig] = detail
 		}
 	}
@@ -879,10 +964,84 @@ func batchSignatures(signatures []string, size int) [][]string {
 	return batches
 }
 
+func buildSignaturesCacheKey(address string, limit int, before string) string {
+	if address == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(address)
+	b.WriteString("|limit=")
+	b.WriteString(strconv.Itoa(limit))
+	b.WriteString("|before=")
+	b.WriteString(before)
+	return b.String()
+}
+
+func buildRewardsCacheKey(addresses []string, epoch *uint64) string {
+	if len(addresses) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("epoch=")
+	if epoch == nil {
+		b.WriteString("current")
+	} else {
+		b.WriteString(strconv.FormatUint(*epoch, 10))
+	}
+	b.WriteString("|addresses=")
+	for i, address := range addresses {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(address)
+	}
+	return b.String()
+}
+
+func cloneSignatureInfos(entries []SignatureInfo) []SignatureInfo {
+	if entries == nil {
+		return nil
+	}
+	cloned := make([]SignatureInfo, len(entries))
+	copy(cloned, entries)
+	return cloned
+}
+
+func cloneInflationRewards(entries []*InflationReward) []*InflationReward {
+	if entries == nil {
+		return nil
+	}
+	cloned := make([]*InflationReward, len(entries))
+	for i, entry := range entries {
+		if entry == nil {
+			continue
+		}
+		value := *entry
+		cloned[i] = &value
+	}
+	return cloned
+}
+
+func (c *RPCSolanaClient) getCachedTransaction(signature string) (*TransactionDetail, bool) {
+	if c == nil || signature == "" {
+		return nil, false
+	}
+	if detail, ok := c.transactionCache.Get(signature); ok {
+		return detail, true
+	}
+	return nil, false
+}
+
 // GetInflationReward fetches inflation rewards for the provided stake accounts.
 func (c *RPCSolanaClient) GetInflationReward(ctx context.Context, addresses []string, epoch *uint64) ([]*InflationReward, error) {
 	if len(addresses) == 0 {
 		return nil, nil
+	}
+
+	c.ensureCaches()
+	cacheKey := buildRewardsCacheKey(addresses, epoch)
+	if cached, ok := c.rewardCache.Get(cacheKey); ok {
+		return cloneInflationRewards(cached), nil
 	}
 
 	params := []any{addresses}
@@ -940,6 +1099,9 @@ func (c *RPCSolanaClient) GetInflationReward(ctx context.Context, addresses []st
 		})
 	}
 
+	if cacheKey != "" {
+		c.rewardCache.Add(cacheKey, cloneInflationRewards(results))
+	}
 	return results, nil
 }
 
