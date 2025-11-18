@@ -28,6 +28,29 @@
   .recent-validators-card {
     text-align: left;
   }
+  .faq-section {
+    margin-top: 2rem;
+    text-align: left;
+  }
+  .faq-label {
+    font-size: 0.9rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #94a3b8;
+    margin-bottom: 0.5rem;
+  }
+  .faq-item + .faq-item {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid #e2e8f0;
+  }
+  .faq-question {
+    font-weight: 600;
+    margin-bottom: 0.25rem;
+  }
+  .faq-answer {
+    color: #495057;
+  }
 </style>
 
 <div class="hero-container">
@@ -97,6 +120,70 @@
             {{ end }}
           </tbody>
         </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="card shadow-soft faq-section">
+    <div class="card-body">
+      <h5 class="mb-3">Frequently Asked Questions</h5>
+
+      <div class="faq-group mb-4">
+        <div class="faq-label">For Users</div>
+
+        <div class="faq-item">
+          <div class="faq-question">Do you support anything other than native SOL staking?</div>
+          <div class="faq-answer">OctoPi currently tracks only native SOL staking and displays XIRR for your validators. If there is sustained interest, we plan to add liquid SOL staking as well as native and liquid ETH staking.</div>
+        </div>
+
+        <div class="faq-item">
+          <div class="faq-question">Why does the wallet page take time to load?</div>
+          <div class="faq-answer">Reward data is fetched from several sources and aggregated on the fly. This pipeline may take a few minutes to finish, so please allow the wallet dashboard to load fully.</div>
+        </div>
+
+        <div class="faq-item">
+          <div class="faq-question">Is the platform stable?</div>
+          <div class="faq-answer">This is a pilot project and we cannot guarantee perfect stability or accuracy. We actively monitor errors and iterate quickly, but expect the occasional hiccup.</div>
+        </div>
+
+        <div class="faq-item">
+          <div class="faq-question">Do you store my wallet data?</div>
+          <div class="faq-answer">We may cache derived wallet metrics to speed up subsequent visits, yet we never store the addresses you enter, nor share any user-provided data with third parties.</div>
+        </div>
+
+        <div class="faq-item">
+          <div class="faq-question">Where is the source code?</div>
+          <div class="faq-answer">All code lives at <a href="https://github.com/monjuik/go-octopi" target="_blank" rel="noopener noreferrer">github.com/monjuik/go-octopi</a>. Please open an Issue if you spot a bug or have a suggestion.</div>
+        </div>
+
+        <div class="faq-item">
+          <div class="faq-question">How do you calculate returns?</div>
+          <div class="faq-answer">We rely on XIRR, the extended internal rate of return, computed from epoch payouts and your current balance. It lets you compare validators fairly even with irregular rewards.</div>
+        </div>
+      </div>
+
+      <div class="faq-group">
+        <div class="faq-label">Popular Searches</div>
+
+        <div class="faq-item">
+          <div class="faq-question">What is OctoPi Portfolio Tracker?</div>
+          <div class="faq-answer">A web app for monitoring Solana staking: enter a wallet address to view earnings, recent validator XIRR snapshots and long-term yield trends in one dashboard.</div>
+        </div>
+
+        <div class="faq-item">
+          <div class="faq-question">How do I choose the best Solana validator?</div>
+          <div class="faq-answer">Use the “Recent validators” block to compare XIRR, look for consistent updates and review payout cadence. Higher, more stable XIRR usually signals a stronger validator.</div>
+        </div>
+
+        <div class="faq-item">
+          <div class="faq-question">Does OctoPi support liquid staking analysis?</div>
+          <div class="faq-answer">We currently focus on native SOL, but liquid tokens like stSOL and future ETH validators are on our roadmap, so stay tuned for upcoming releases.</div>
+        </div>
+
+        <div class="faq-item">
+          <div class="faq-question">Do I need to connect my wallet?</div>
+          <div class="faq-answer">No connection is required: simply paste a public address. OctoPi never requests private keys and runs entirely in read-only mode for maximum safety.</div>
+        </div>
       </div>
     </div>
   </div>
