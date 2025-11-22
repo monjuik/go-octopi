@@ -1,215 +1,301 @@
 {{ define "content" }}
 <style>
-  body.home {
-    background: linear-gradient(180deg, #f8fafc 0%, #f1f3f5 100%);
-    min-height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-direction: column;
-  }
-  .hero-container {
-    max-width: 700px;
-    text-align: center;
-    padding: 2rem;
-  }
-  .hero-container .form-control,
-  .hero-container .btn-primary {
-    height: 3rem;
-    font-size: 1.1rem;
-  }
-  .hero-container .card {
-    border: 0;
-    border-radius: 1rem;
-  }
-  .shadow-soft {
-    box-shadow: 0 0.25rem 1rem rgba(0, 0, 0, 0.05);
-  }
-  .recent-validators-card {
-    text-align: left;
-  }
-  .faq-section {
-    margin-top: 2rem;
-    text-align: left;
-  }
-  .faq-label {
-    font-size: 0.9rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: #94a3b8;
-    margin-bottom: 0.5rem;
-  }
-  .faq-item + .faq-item {
-    margin-top: 1rem;
-    padding-top: 1rem;
-    border-top: 1px solid #e2e8f0;
-  }
-  .faq-question {
-    font-weight: 600;
-    margin-bottom: 0.25rem;
-  }
-  .faq-answer {
-    color: #495057;
-  }
+    body.home {
+        background: linear-gradient(180deg, #f8fafc 0%, #f1f3f5 100%);
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+    }
+    .hero-container {
+        max-width: 700px;
+        text-align: center;
+        padding: 2rem;
+    }
+    .hero-container .form-control,
+    .hero-container .btn-primary {
+        height: 3rem;
+        font-size: 1.1rem;
+    }
+    .hero-container .card {
+        border: 0;
+        border-radius: 1rem;
+    }
+    .shadow-soft {
+        box-shadow: 0 0.25rem 1rem rgba(0, 0, 0, 0.05);
+    }
+    .recent-validators-card {
+        text-align: left;
+    }
+    .faq-section {
+        margin-top: 2rem;
+        text-align: left;
+    }
+    .faq-label {
+        font-size: 0.9rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #94a3b8;
+        margin-bottom: 0.5rem;
+    }
+    .faq-item + .faq-item {
+        margin-top: 1rem;
+        padding-top: 1rem;
+        border-top: 1px solid #e2e8f0;
+    }
+    .faq-question {
+        font-weight: 600;
+        margin-bottom: 0.25rem;
+    }
+    .faq-answer {
+        color: #495057;
+    }
 </style>
 
 <div class="hero-container">
-  <div class="mb-4">
-    <img src="{{ .LogoDataURI }}" width="128" height="128" alt="OctoPi logo">
-  </div>
-  <h1 class="fw-semibold mb-3">OctoPi Portfolio Tracker</h1>
-  <p class="text-muted mb-4">
-    Track staking rewards and on-chain performance across your Solana wallets from a single dashboard.
-  </p>
-
-  <form id="walletForm" class="row g-2 justify-content-center">
-    <div class="col-md-8 col-sm-10">
-      <input id="walletInput" type="text" class="form-control" placeholder="Enter your wallet address" required>
+    <div class="mb-4">
+        <img
+            src="{{ .LogoDataURI }}"
+            width="128"
+            height="128"
+            alt="OctoPi logo"
+        />
     </div>
-    <div class="col-auto">
-      <button type="submit" class="btn btn-primary">View portfolio</button>
+    <h1 class="fw-semibold mb-3">OctoPi Portfolio Tracker<sub>β</sub></h1>
+
+    <p class="text-muted mb-4">
+        Track staking rewards and on-chain performance of your Solana wallet.
+    </p>
+
+    <form id="walletForm" class="row g-2 justify-content-center">
+        <div class="col-md-8 col-sm-10">
+            <input
+                id="walletInput"
+                type="text"
+                class="form-control"
+                placeholder="Enter your wallet address"
+                required
+            />
+        </div>
+        <div class="col-auto">
+            <button type="submit" class="btn btn-primary">
+                View portfolio
+            </button>
+        </div>
+    </form>
+
+    <div id="errorMessage" class="text-danger small mt-3" style="display: none">
+        Invalid address format. Please check and try again.
     </div>
-  </form>
 
-  <div id="errorMessage" class="text-danger small mt-3" style="display:none;">
-    Invalid address format. Please check and try again.
-  </div>
-
-  <div class="mt-4">
-    <button class="btn btn-outline-secondary btn-sm" id="demoWallet">
-      <i class="bi bi-lightning-charge"></i> Try demo wallet
-    </button>
-  </div>
-
-  <div class="card shadow-soft mt-5 recent-validators-card">
-    <div class="card-body">
-      <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
-        <h5 class="mb-0">Recent validators</h5>
-        <span class="text-muted small">Latest XIRR snapshots</span>
-      </div>
-      <div class="table-responsive">
-        <table class="table align-middle mb-0">
-          <thead>
-            <tr>
-              <th scope="col">Validator</th>
-              <th scope="col" class="text-end">XIRR</th>
-            </tr>
-          </thead>
-          <tbody>
-            {{ if .RecentVals }}
-              {{ range .RecentVals }}
-              <tr>
-                <td>
-                  <div class="fw-semibold">{{ if .Name }}{{ .Name }}{{ else }}{{ .VoteAccount }}{{ end }}</div>
-                  <div class="text-muted small">{{ .VoteAccount }}</div>
-                </td>
-                <td class="text-end">
-                  <div class="fw-semibold">{{ printf "%.2f%%" .XIRR }}</div>
-                  {{ if not (.UpdatedAt.IsZero) }}
-                  <div class="text-muted small">{{ .UpdatedAt.Format "02 Jan 15:04 UTC" }}</div>
-                  {{ end }}
-                </td>
-              </tr>
-              {{ end }}
-            {{ else }}
-              <tr>
-                <td colspan="2" class="text-center text-muted py-4">
-                  No validators sampled yet. Open a wallet to start tracking.
-                </td>
-              </tr>
-            {{ end }}
-          </tbody>
-        </table>
-      </div>
+    <div class="mt-4">
+        <button class="btn btn-outline-secondary btn-sm" id="demoWallet">
+            <i class="bi bi-lightning-charge"></i> Try demo wallet
+        </button>
     </div>
-  </div>
 
-  <div class="card shadow-soft faq-section">
-    <div class="card-body">
-      <h5 class="mb-3">Frequently Asked Questions</h5>
-
-      <div class="faq-group mb-4">
-        <div class="faq-label">For Users</div>
-
-        <div class="faq-item">
-          <div class="faq-question">Do you support anything other than native SOL staking?</div>
-          <div class="faq-answer">OctoPi currently tracks only native SOL staking and displays XIRR for your validators. If there is sustained interest, we plan to add liquid SOL staking as well as native and liquid ETH staking.</div>
+    <div class="card shadow-soft mt-5 recent-validators-card">
+        <div class="card-body">
+            <div
+                class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2"
+            >
+                <h5 class="mb-0">Recent validators</h5>
+                <span class="text-muted small">Latest XIRR snapshots</span>
+            </div>
+            <div class="table-responsive">
+                <table class="table align-middle mb-0">
+                    <thead>
+                        <tr>
+                            <th scope="col">Validator</th>
+                            <th scope="col" class="text-end">XIRR</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {{ if .RecentVals }} {{ range .RecentVals }}
+                        <tr>
+                            <td>
+                                <div class="fw-semibold">
+                                    {{ if .Name }}{{ .Name }}{{ else }}{{
+                                    .VoteAccount }}{{ end }}
+                                </div>
+                                <div class="text-muted small">
+                                    {{ .VoteAccount }}
+                                </div>
+                            </td>
+                            <td class="text-end">
+                                <div class="fw-semibold">
+                                    {{ printf "%.2f%%" .XIRR }}
+                                </div>
+                                {{ if not (.UpdatedAt.IsZero) }}
+                                <div class="text-muted small">
+                                    {{ .UpdatedAt.Format "02 Jan 15:04 UTC" }}
+                                </div>
+                                {{ end }}
+                            </td>
+                        </tr>
+                        {{ end }} {{ else }}
+                        <tr>
+                            <td colspan="2" class="text-center text-muted py-4">
+                                No validators sampled yet. Open a wallet to
+                                start tracking.
+                            </td>
+                        </tr>
+                        {{ end }}
+                    </tbody>
+                </table>
+            </div>
         </div>
-
-        <div class="faq-item">
-          <div class="faq-question">Why does the wallet page take time to load?</div>
-          <div class="faq-answer">Reward data is fetched from several sources and aggregated on the fly. This pipeline may take a few minutes to finish, so please allow the wallet dashboard to load fully.</div>
-        </div>
-
-        <div class="faq-item">
-          <div class="faq-question">Is the platform stable?</div>
-          <div class="faq-answer">This is a pilot project and we cannot guarantee perfect stability or accuracy. We actively monitor errors and iterate quickly, but expect the occasional hiccup.</div>
-        </div>
-
-        <div class="faq-item">
-          <div class="faq-question">Do you store my wallet data?</div>
-          <div class="faq-answer">We may cache derived wallet metrics to speed up subsequent visits, yet we never store the addresses you enter, nor share any user-provided data with third parties.</div>
-        </div>
-
-        <div class="faq-item">
-          <div class="faq-question">Where is the source code?</div>
-          <div class="faq-answer">All code lives at <a href="https://github.com/monjuik/go-octopi" target="_blank" rel="noopener noreferrer">github.com/monjuik/go-octopi</a>. Please open an Issue if you spot a bug or have a suggestion.</div>
-        </div>
-
-        <div class="faq-item">
-          <div class="faq-question">How do you calculate returns?</div>
-          <div class="faq-answer">We rely on XIRR, the extended internal rate of return, computed from epoch payouts and your current balance. It lets you compare validators fairly even with irregular rewards.</div>
-        </div>
-      </div>
-
-      <div class="faq-group">
-        <div class="faq-label">Popular Searches</div>
-
-        <div class="faq-item">
-          <div class="faq-question">What is OctoPi Portfolio Tracker?</div>
-          <div class="faq-answer">A web app for monitoring Solana staking: enter a wallet address to view earnings, recent validator XIRR snapshots and long-term yield trends in one dashboard.</div>
-        </div>
-
-        <div class="faq-item">
-          <div class="faq-question">How do I choose the best Solana validator?</div>
-          <div class="faq-answer">Use the “Recent validators” block to compare XIRR, look for consistent updates and review payout cadence. Higher, more stable XIRR usually signals a stronger validator.</div>
-        </div>
-
-        <div class="faq-item">
-          <div class="faq-question">Does OctoPi support liquid staking analysis?</div>
-          <div class="faq-answer">We currently focus on native SOL, but liquid tokens like stSOL and future ETH validators are on our roadmap, so stay tuned for upcoming releases.</div>
-        </div>
-
-        <div class="faq-item">
-          <div class="faq-question">Do I need to connect my wallet?</div>
-          <div class="faq-answer">No connection is required: simply paste a public address. OctoPi never requests private keys and runs entirely in read-only mode for maximum safety.</div>
-        </div>
-      </div>
     </div>
-  </div>
+
+    <div class="card shadow-soft faq-section">
+        <div class="card-body">
+            <h5 class="mb-3">Frequently Asked Questions</h5>
+
+            <div class="faq-group mb-4">
+                <div class="faq-item">
+                    <div class="faq-question">
+                        Do you support anything other than native SOL staking?
+                    </div>
+                    <div class="faq-answer">
+                        OctoPi currently tracks only native SOL staking and
+                        displays XIRR for your validators. If there is sustained
+                        interest, we plan to add liquid SOL staking as well as
+                        native and liquid ETH staking.
+                    </div>
+                </div>
+
+                <div class="faq-item">
+                    <div class="faq-question">
+                        Why does the wallet page take time to load?
+                    </div>
+                    <div class="faq-answer">
+                        Please, be patient. Reward data is fetched from several
+                        sources and aggregated on the fly. This pipeline may
+                        take a few seconds to finish, so please allow the wallet
+                        dashboard to load fully.
+                    </div>
+                </div>
+
+                <div class="faq-item">
+                    <div class="faq-question">Is the platform stable?</div>
+                    <div class="faq-answer">
+                        This is a pilot project and we cannot guarantee perfect
+                        stability or accuracy. We actively monitor errors and
+                        iterate quickly, but expect the occasional hiccup.
+                        Currently only free tiers of the API are used to fetch
+                        data.
+                    </div>
+                </div>
+
+                <div class="faq-item">
+                    <div class="faq-question">Do you store my wallet data?</div>
+                    <div class="faq-answer">
+                        We may cache derived wallet metrics to speed up
+                        subsequent visits, yet we never store the addresses you
+                        enter, nor share any user-provided data with third
+                        parties.
+                    </div>
+                </div>
+
+                <div class="faq-item">
+                    <div class="faq-question">Where is the source code?</div>
+                    <div class="faq-answer">
+                        All code lives at
+                        <a
+                            href="https://github.com/monjuik/go-octopi"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            >github.com/monjuik/go-octopi</a
+                        >. Please open an Issue if you spot a bug or have a
+                        suggestion.
+                    </div>
+                </div>
+
+                <div class="faq-item">
+                    <div class="faq-question">
+                        How do you calculate returns?
+                    </div>
+                    <div class="faq-answer">
+                        We rely on XIRR, the extended internal rate of return,
+                        computed from epoch payouts and your current balance. It
+                        lets you compare validators fairly even with irregular
+                        rewards.
+                    </div>
+                </div>
+            </div>
+
+            <div class="faq-group">
+                <div class="faq-item">
+                    <div class="faq-question">
+                        What is OctoPi Portfolio Tracker?
+                    </div>
+                    <div class="faq-answer">
+                        A web app for monitoring Solana staking: enter a wallet
+                        address to view earnings, recent validator XIRR
+                        snapshots and long-term yield trends in one dashboard.
+                    </div>
+                </div>
+
+                <div class="faq-item">
+                    <div class="faq-question">
+                        How do I choose the best Solana validator?
+                    </div>
+                    <div class="faq-answer">
+                        Use the “Recent validators” block to compare XIRR, look
+                        for consistent updates and review payout cadence.
+                        Higher, more stable XIRR usually signals a stronger
+                        validator.
+                    </div>
+                </div>
+
+                <div class="faq-item">
+                    <div class="faq-question">
+                        Does OctoPi support liquid staking analysis?
+                    </div>
+                    <div class="faq-answer">
+                        We currently focus on native SOL, but liquid tokens like
+                        stSOL and future ETH validators are on our roadmap, so
+                        stay tuned for upcoming releases.
+                    </div>
+                </div>
+
+                <div class="faq-item">
+                    <div class="faq-question">
+                        Do I need to connect my wallet?
+                    </div>
+                    <div class="faq-answer">
+                        No connection is required: simply paste a public
+                        address. OctoPi never requests private keys and runs
+                        entirely in read-only mode for maximum safety.
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
 
 <script>
-  const form = document.getElementById('walletForm');
-  const input = document.getElementById('walletInput');
-  const errorMsg = document.getElementById('errorMessage');
+    const form = document.getElementById("walletForm");
+    const input = document.getElementById("walletInput");
+    const errorMsg = document.getElementById("errorMessage");
 
-  function isValidSolAddress(address) {
-    return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address);
-  }
-
-  form.addEventListener('submit', (e) => {
-    e.preventDefault();
-    const addr = input.value.trim();
-    if (isValidSolAddress(addr)) {
-      window.location.href = `/wallet/${addr}`;
-    } else {
-      errorMsg.style.display = 'block';
+    function isValidSolAddress(address) {
+        return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address);
     }
-  });
 
-  document.getElementById('demoWallet').addEventListener('click', () => {
-    window.location.href = '/wallet/demo';
-  });
+    form.addEventListener("submit", (e) => {
+        e.preventDefault();
+        const addr = input.value.trim();
+        if (isValidSolAddress(addr)) {
+            window.location.href = `/wallet/${addr}`;
+        } else {
+            errorMsg.style.display = "block";
+        }
+    });
+
+    document.getElementById("demoWallet").addEventListener("click", () => {
+        window.location.href = "/wallet/demo";
+    });
 </script>
 {{ end }}
