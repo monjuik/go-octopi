@@ -206,7 +206,7 @@ func TestWalletAddressRouteRendersBalance(t *testing.T) {
 	if metricIdx == -1 {
 		t.Fatalf("wallet view missing 28d rewards marker")
 	}
-	metricSliceEnd := metricIdx + 200
+	metricSliceEnd := metricIdx + 400
 	if metricSliceEnd > len(body) {
 		metricSliceEnd = len(body)
 	}
@@ -216,7 +216,7 @@ func TestWalletAddressRouteRendersBalance(t *testing.T) {
 	if annualIdx == -1 {
 		t.Fatalf("wallet view missing annual return metric label: %q", body)
 	}
-	valueMarker := `<div class="fs-5 fw-semibold mt-1">`
+	valueMarker := `<div class="metric-value fs-5 fw-semibold mt-1">`
 	valueStart := strings.Index(body[annualIdx:], valueMarker)
 	if valueStart == -1 {
 		t.Fatalf("wallet view missing annual return value block: %q", body)

@@ -1960,6 +1960,10 @@ func newRateLimitedHTTPClient(endpoint string) *http.Client {
 			Base:    transport,
 		}
 	}
+	transport = &metricsTransport{
+		Base:    transport,
+		Counter: externalResponseCounts,
+	}
 	return &http.Client{
 		Timeout:   defaultHTTPTimeout,
 		Transport: transport,

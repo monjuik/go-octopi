@@ -5,6 +5,7 @@ import (
 	"embed"
 	"encoding/base64"
 	"encoding/json"
+	"expvar"
 	"fmt"
 	"html/template"
 	"math"
@@ -15,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	lru "github.com/hashicorp/golang-lru/v2"
 )
 
 var (
@@ -53,6 +56,8 @@ type server struct {
 	logger       Logger
 	tipCollector *jitoTipCollector
 	walletCache  *walletSummaryCache
+	walletSeen   *lru.Cache[string, struct{}]
+	walletSeenMu sync.Mutex
 }
 
 type serverConfig struct {
@@ -172,10 +177,13 @@ func NewServer(opts ...ServerOption) http.Handler {
 	if cfg.logger == nil {
 		cfg.logger = defaultServerLogger
 	}
+
+	uniqueWallets := newUniqueWalletLRU()
 	srv := &server{
 		solanaClient: cfg.solanaClient,
 		logger:       cfg.logger,
 		walletCache:  newWalletSummaryCache(),
+		walletSeen:   uniqueWallets,
 	}
 	srv.tipCollector = newJitoTipCollector(cfg.solanaClient, cfg.logger)
 
@@ -183,9 +191,10 @@ func NewServer(opts ...ServerOption) http.Handler {
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/", srv.handleHome)
-	mux.HandleFunc("/wallet/demo", srv.handleWalletDemo)
-	mux.HandleFunc("/wallet/", srv.handleWallet)
+	mux.Handle("/", srv.withResponseMetrics(http.HandlerFunc(srv.handleHome)))
+	mux.Handle("/wallet/demo", srv.withResponseMetrics(http.HandlerFunc(srv.handleWalletDemo)))
+	mux.Handle("/wallet/", srv.withResponseMetrics(http.HandlerFunc(srv.handleWallet)))
+	mux.Handle("/debug/vars", expvar.Handler())
 
 	return mux
 }
@@ -274,6 +283,7 @@ func (s *server) handleWallet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid Solana address", http.StatusBadRequest)
 		return
 	}
+	s.recordUniqueWallet(address)
 
 	ctx := r.Context()
 	now := time.Now().UTC()
@@ -416,6 +426,39 @@ func buildWalletMetrics(now time.Time, delegatedSOL float64, rewards []RewardRow
 			Tooltip: walletAnnualReturnTooltip,
 		},
 	}
+}
+
+func (s *server) withResponseMetrics(next http.Handler) http.Handler {
+	if next == nil {
+		return nil
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		incrementResponseCount(appResponseCounts, rec.status)
+	})
+}
+
+func (s *server) recordUniqueWallet(address string) {
+	if s == nil || s.walletSeen == nil || address == "" {
+		return
+	}
+	s.walletSeenMu.Lock()
+	s.walletSeen.Add(address, struct{}{})
+	walletUniqueRecent.Set(int64(s.walletSeen.Len()))
+	s.walletSeenMu.Unlock()
+}
+
+func newUniqueWalletLRU() *lru.Cache[string, struct{}] {
+	capacity := loadIntEnv(metricWalletLRUCapacityEnv, 1000)
+	if capacity <= 0 {
+		return nil
+	}
+	store, err := lru.New[string, struct{}](capacity)
+	if err != nil {
+		return nil
+	}
+	return store
 }
 
 func sumRewardsSince(rewards []RewardRow, cutoff time.Time) float64 {
