@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export OCTOPI_SERVER_PORT=8082
+
 # Copy this file to run.sh (which is gitignored) and replace the placeholder value
 # with your actual API keys.
 export HELIUS_API_KEY="paste-your-helius-api-key"
