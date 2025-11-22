@@ -1,6 +1,6 @@
 # go-octopi
-A crypto wallet tracker for monitoring staking rewards for SOL and ETH
+A crypto wallet tracker for monitoring native staking rewards for SOL.
 
 ## Configuration
 
-Set `OCTOPI_SERVER_PORT` to specify the port on which the server should listen, default is 8080.
+App configuration is applied via environment variables, describes in `run.sh.example`
