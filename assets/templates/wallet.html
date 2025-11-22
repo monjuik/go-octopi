@@ -1,179 +1,210 @@
 {{ define "content" }}
 <style>
-  body.wallet {
-    background: #f7f8fa;
-  }
-  .container-narrow {
-    max-width: 980px;
-  }
-  .card {
-    border: 0;
-    border-radius: 1rem;
-  }
-  .shadow-soft {
-    box-shadow: 0 0.25rem 1rem rgba(0, 0, 0, 0.05);
-  }
-  .metric-card {
-    padding: 1.75rem 1rem;
-  }
-  .wallet-badge {
-    font-size: 0.875rem;
-  }
+    body.wallet {
+        background: #f7f8fa;
+    }
+    .container-narrow {
+        max-width: 980px;
+    }
+    .card {
+        border: 0;
+        border-radius: 1rem;
+    }
+    .shadow-soft {
+        box-shadow: 0 0.25rem 1rem rgba(0, 0, 0, 0.05);
+    }
+    .metric-card {
+        padding: 1.75rem 1rem;
+    }
+    .wallet-badge {
+        font-size: 0.875rem;
+    }
+    .metric-value {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0.2rem 0.75rem;
+        line-height: 1.2;
+    }
 </style>
 
 {{ with .Wallet }}
 <div class="container container-narrow py-4">
-  <div class="d-flex flex-wrap justify-content-between align-items-center mb-4 gap-3">
-    <a href="/" class="d-inline-flex align-items-center gap-2 text-decoration-none text-dark fw-semibold fs-4 m-0">
-      <img src="{{ $.LogoDataURI }}" width="36" height="36" alt="OctoPi logo">
-      <span>Portfolio Dashboard</span>
-    </a>
-
-  </div>
-
-  <div class="card mb-4 shadow-soft">
-    <div class="card-body">
-      <div class="d-flex justify-content-between align-items-center flex-wrap gap-3">
-        <div>
-          <div class="d-flex align-items-center gap-2">
-            <span class="wallet-badge badge text-bg-light border">{{ .Network }}</span>
-          </div>
-          <h5 class="card-title mb-1 mt-2">Wallet summary</h5>
-          <div class="text-muted small">Updated: {{ .Updated }}</div>
-          <div class="small text-muted mt-2">
-            Address: <span>{{ .Address }}</span>
-          </div>
-        </div>
-        <div class="text-end">
-          <div class="fs-4 fw-semibold">{{ .BalanceCrypto }}</div>
-          {{ if .BalanceFiat }}
-          <div class="text-muted">{{ .BalanceFiat }}</div>
-          {{ end }}
-        </div>
-      </div>
+    <div
+        class="d-flex flex-wrap justify-content-between align-items-center mb-4 gap-3"
+    >
+        <a
+            href="/"
+            class="d-inline-flex align-items-center gap-2 text-decoration-none text-dark fw-semibold fs-4 m-0"
+        >
+            <img
+                src="{{ $.LogoDataURI }}"
+                width="36"
+                height="36"
+                alt="OctoPi logo"
+            />
+            <span>Portfolio Dashboard</span>
+        </a>
     </div>
-  </div>
 
-  <div class="row row-cols-1 row-cols-md-3 g-3">
-    {{ range .Metrics }}
-    <div class="col">
-      <div class="card shadow-soft metric-card h-100">
-        <div class="card-body text-center">
-          <div class="text-muted small d-flex justify-content-center align-items-center gap-1">
-            <span>{{ .Label }}</span>
-            {{ if .Tooltip }}
-            <span data-bs-toggle="tooltip" title="{{ .Tooltip }}">
-              <i class="bi bi-question-circle"></i>
-            </span>
-            {{ end }}
-          </div>
-          <div class="fs-5 fw-semibold mt-1">{{ .Value }}</div>
-          <div class="text-muted small mt-1">{{ .Subtext }}</div>
+    <div class="card mb-4 shadow-soft">
+        <div class="card-body">
+            <div
+                class="d-flex justify-content-between align-items-center flex-wrap gap-3"
+            >
+                <div>
+                    <div class="d-flex align-items-center gap-2">
+                        <span class="wallet-badge badge text-bg-light border"
+                            >{{ .Network }}</span
+                        >
+                    </div>
+                    <h5 class="card-title mb-1 mt-2">Wallet summary</h5>
+                    <div class="text-muted small">Updated: {{ .Updated }}</div>
+                    <div class="small text-muted mt-2">
+                        Address: <span>{{ .Address }}</span>
+                    </div>
+                </div>
+                <div class="text-end">
+                    <div class="fs-4 fw-semibold">{{ .BalanceCrypto }}</div>
+                    {{ if .BalanceFiat }}
+                    <div class="text-muted">{{ .BalanceFiat }}</div>
+                    {{ end }}
+                </div>
+            </div>
         </div>
-      </div>
+    </div>
+
+    <div class="row row-cols-1 row-cols-md-3 g-3">
+        {{ range .Metrics }}
+        <div class="col">
+            <div class="card shadow-soft metric-card h-100">
+                <div class="card-body text-center">
+                    <div
+                        class="text-muted small d-flex justify-content-center align-items-center gap-1"
+                    >
+                        <span>{{ .Label }}</span>
+                        {{ if .Tooltip }}
+                        <span data-bs-toggle="tooltip" title="{{ .Tooltip }}">
+                            <i class="bi bi-question-circle"></i>
+                        </span>
+                        {{ end }}
+                    </div>
+                    <div class="metric-value fs-5 fw-semibold mt-1">
+                        {{ .Value }}
+                    </div>
+                    <div class="text-muted small mt-1">{{ .Subtext }}</div>
+                </div>
+            </div>
+        </div>
+        {{ end }}
+    </div>
+
+    <div class="card mt-4 shadow-soft">
+        <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h5 class="mb-0">Weekly rewards</h5>
+                <span class="text-muted small">Current week + previous 4</span>
+            </div>
+            <div
+                id="walletChart"
+                style="height: 320px"
+                data-chart="{{ .ChartJSON }}"
+            ></div>
+        </div>
+    </div>
+
+    <div class="card mt-4 shadow-soft">
+        <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h5 class="mb-0">Recent rewards</h5>
+                <span class="text-muted small">Current week + previous 4</span>
+            </div>
+            <div class="table-responsive">
+                <table class="table align-middle mb-0">
+                    <thead>
+                        <tr>
+                            <th scope="col">Date</th>
+                            <th scope="col">Type</th>
+                            <th class="text-end" scope="col">SOL</th>
+                            <th scope="col">Validator</th>
+                            <th scope="col">Epoch</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {{ if .Rewards }} {{ range .Rewards }}
+                        <tr>
+                            <td>{{ .Date }}</td>
+                            <td>{{ .Type }}</td>
+                            <td class="text-end">
+                                <div>{{ .AmountSOL }}</div>
+                                {{ if .AmountUSD }}
+                                <div class="text-muted small">
+                                    {{ .AmountUSD }}
+                                </div>
+                                {{ end }}
+                            </td>
+                            <td>{{ .Validator }}</td>
+                            <td>{{ .Epoch }}</td>
+                        </tr>
+                        {{ end }} {{ else }}
+                        <tr>
+                            <td colspan="5" class="text-center text-muted py-4">
+                                No rewards found for this wallet yet.
+                            </td>
+                        </tr>
+                        {{ end }}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    {{ if $.IsDemo }}
+    <div class="text-center text-muted small mt-4">
+        Mock data for layout preview only.
     </div>
     {{ end }}
-  </div>
-
-  <div class="card mt-4 shadow-soft">
-    <div class="card-body">
-      <div class="d-flex justify-content-between align-items-center mb-3">
-        <h5 class="mb-0">Weekly rewards</h5>
-        <span class="text-muted small">Current week + previous 4</span>
-      </div>
-      <div id="walletChart" style="height:320px;" data-chart='{{ .ChartJSON }}'></div>
-    </div>
-  </div>
-
-  <div class="card mt-4 shadow-soft">
-    <div class="card-body">
-      <div class="d-flex justify-content-between align-items-center mb-3">
-        <h5 class="mb-0">Recent rewards</h5>
-        <span class="text-muted small">Current week + previous 4</span>
-      </div>
-      <div class="table-responsive">
-        <table class="table align-middle mb-0">
-          <thead>
-            <tr>
-              <th scope="col">Date</th>
-              <th scope="col">Type</th>
-              <th class="text-end" scope="col">SOL</th>
-              <th scope="col">Validator</th>
-              <th scope="col">Epoch</th>
-            </tr>
-          </thead>
-          <tbody>
-            {{ if .Rewards }}
-              {{ range .Rewards }}
-              <tr>
-                <td>{{ .Date }}</td>
-                <td>{{ .Type }}</td>
-                <td class="text-end">
-                  <div>{{ .AmountSOL }}</div>
-                  {{ if .AmountUSD }}
-                  <div class="text-muted small">{{ .AmountUSD }}</div>
-                  {{ end }}
-                </td>
-                <td>{{ .Validator }}</td>
-                <td>{{ .Epoch }}</td>
-              </tr>
-              {{ end }}
-            {{ else }}
-              <tr>
-                <td colspan="5" class="text-center text-muted py-4">No rewards found for this wallet yet.</td>
-              </tr>
-            {{ end }}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-
-  {{ if $.IsDemo }}
-  <div class="text-center text-muted small mt-4">
-    Mock data for layout preview only.
-  </div>
-  {{ end }}
 </div>
 
 <script>
-  window.addEventListener("load", () => {
-    if (window.bootstrap?.Tooltip) {
-      document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach((el) => {
-        new window.bootstrap.Tooltip(el);
-      });
-    }
+    window.addEventListener("load", () => {
+        if (window.bootstrap?.Tooltip) {
+            document
+                .querySelectorAll('[data-bs-toggle="tooltip"]')
+                .forEach((el) => {
+                    new window.bootstrap.Tooltip(el);
+                });
+        }
 
-    const chartEl = document.getElementById("walletChart");
-    if (chartEl && chartEl.dataset.chart && window.ApexCharts) {
-      const payload = JSON.parse(chartEl.dataset.chart);
-      const chart = new window.ApexCharts(chartEl, {
-        chart: { type: "bar", height: 320, toolbar: { show: false } },
-        plotOptions: {
-          bar: {
-            borderRadius: 6,
-            columnWidth: "55%",
-          },
-        },
-        dataLabels: { enabled: false },
-        xaxis: { categories: payload.labels },
-        yaxis: {
-          labels: {
-            formatter: (val) => Number(val).toFixed(5),
-          },
-        },
-        series: payload.series,
-        colors: ["#6f4ef2"],
-        stroke: { show: false },
-        tooltip: {
-          y: {
-            formatter: (val) => `${Number(val).toFixed(9)} SOL`,
-          },
-        },
-      });
-      chart.render();
-    }
-  });
+        const chartEl = document.getElementById("walletChart");
+        if (chartEl && chartEl.dataset.chart && window.ApexCharts) {
+            const payload = JSON.parse(chartEl.dataset.chart);
+            const chart = new window.ApexCharts(chartEl, {
+                chart: { type: "bar", height: 320, toolbar: { show: false } },
+                plotOptions: {
+                    bar: {
+                        borderRadius: 6,
+                        columnWidth: "55%",
+                    },
+                },
+                dataLabels: { enabled: false },
+                xaxis: { categories: payload.labels },
+                yaxis: {
+                    labels: {
+                        formatter: (val) => Number(val).toFixed(5),
+                    },
+                },
+                series: payload.series,
+                colors: ["#6f4ef2"],
+                stroke: { show: false },
+                tooltip: {
+                    y: {
+                        formatter: (val) => `${Number(val).toFixed(9)} SOL`,
+                    },
+                },
+            });
+            chart.render();
+        }
+    });
 </script>
-{{ end }}
-{{ end }}
+{{ end }} {{ end }}
