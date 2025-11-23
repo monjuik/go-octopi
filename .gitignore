@@ -57,3 +57,7 @@ coverage.out
 # Octopi cache
 
 sol-epochs.gob
+
+# Logs
+
+*.log
